@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pipeline-cycle-time"
+version = "0.1.0"
+description = "CI pipeline cycle time analysis agent"
+requires-python = ">=3.11"
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[project.scripts]
+pipeline-cycle-time = "pipeline_cycle_time.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
