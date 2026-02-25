@@ -54,6 +54,32 @@ WEBAPP      [startup ~warmup~][--- stable 0.3-0.5 CPU, 1.6GB mem -------->
             CPU peak 2.09c    HikariCP max 4 conn, zero pending
 ```
 
+I’m not sure where the 30 seconds came from based on the committed log:
+parent startup (from submitted to running) ~ 15 sec
+```
+2026-02-24T18:21:04.907+0000 [INFO ] Storing policy '[default-policy]' data
+2026-02-24T18:21:06.535+0000 [INFO ] Acquired by: k8s-agent concord/agentpool-dev1-b-default-00000 @ 10.13.49.27
+2026-02-24T18:21:12.361+0000 [INFO ] Repository data export took 5357ms
+2026-02-24T18:21:20.278+0000 [INFO ] Process status: RUNNING
+```
+
+first resume ~ 20 sec (e2e tests still running, this resume doesn’t affect the overall process time at all)
+```
+2026-02-24T18:29:41.906+0000 [INFO ] Storing policy '[default-policy]' data
+2026-02-24T18:29:58.292+0000 [INFO ] Acquired by: k8s-agent concord/agentpool-dev1-b-default-00000 @ 10.13.54.23
+2026-02-24T18:30:04.011+0000 [INFO ] Repository data export took 5204ms
+2026-02-24T18:30:11.537+0000 [INFO ] Process status: RUNNING
+```
+
+second/last resume ~9 sec 
+```
+2026-02-24T18:41:14.207+0000 [INFO ] Storing policy '[default-policy]' data
+2026-02-24T18:41:16.226+0000 [INFO ] Acquired by: k8s-agent concord/agentpool-dev1-b-default-00000 @ 10.13.54.23
+2026-02-24T18:41:16.922+0000 [INFO ] Repository data export took 648ms
+2026-02-24T18:41:23.025+0000 [INFO ] Process status: RUNNING
+```
+
+
 **Legend:** `[===]` active work, `[~~~]` idle/suspended, `[-->` continues, `|` phase boundary
 
 **Key observation:** The pipeline is fundamentally sequential: Concord orchestration must complete before tests begin. The ~18-minute orchestration phase — of which only 2m45s is active work — is the primary wall-clock bottleneck.
@@ -68,6 +94,8 @@ WEBAPP      [startup ~warmup~][--- stable 0.3-0.5 CPU, 1.6GB mem -------->
 - **Estimated savings:** 60s
 - **Difficulty:** Low — cache or skip repo export on resume when no source changes occurred.
 - **Priority:** P1 — Pure waste with a straightforward fix.
+>> Saving 60 seconds isn’t possible in this case, because the parent resumes only when one of the child processes finishes. two child processes finishing at different times...
+>> So in the best case, the savings here would be 30 seconds (if resume were completely free)
 
 ### Rank 2: Parallelize Concord Child Checking
 - **Description:** The Concord parent checks children sequentially: it resumes for child c6cbe79e, confirms completion, re-suspends, then later resumes for 806f92a1. If both children are checked in a single resume, the second suspend/resume cycle (with its ~30s overhead) is eliminated entirely.
@@ -75,6 +103,7 @@ WEBAPP      [startup ~warmup~][--- stable 0.3-0.5 CPU, 1.6GB mem -------->
 - **Estimated savings:** 30-45s
 - **Difficulty:** Medium — requires changes to Concord's child-wait logic.
 - **Priority:** P1
+>> same here. two child processes finishing at different times...
 
 ### Rank 3: Reduce K8s Pod Startup Latency
 - **Description:** Dispatcher jobs wait 196s for pod scheduling and container startup before running 17s of actual work. This 10:1 overhead suggests opportunity in pod pre-warming, smaller container images, or a warm pool of dispatcher pods.
