@@ -84,7 +84,40 @@ def analyze_live(
 
     meta = discovery.discover_from_log(concord_log)
 
-    s3_reports.fetch_reports(meta.s3_bucket, aws_profile, str(base_dir))
+    child_logs: list[str] = [concord_log]
+    to_visit = list(meta.child_process_ids)
+    seen: set[str] = set()
+    while to_visit:
+        child_id = to_visit.pop(0)
+        if child_id in seen:
+            continue
+        seen.add(child_id)
+        try:
+            child_log = concord.fetch_log(
+                process_id=child_id,
+                token=token,
+                concord_base_url=concord_url,
+            )
+        except RuntimeError:
+            continue
+        child_logs.append(child_log)
+        (logs_dir / f"concord-child-{child_id}.txt").write_text(child_log)
+        for nested_id in discovery.extract_child_process_ids(child_log):
+            if nested_id not in seen:
+                to_visit.append(nested_id)
+
+    explicit_locations = s3_reports.discover_locations_from_concord_logs(child_logs)
+
+    s3_reports.fetch_reports(
+        meta.s3_bucket,
+        aws_profile,
+        str(base_dir),
+        prefix=meta.s3_folder,
+        process_date=meta.start_ts.date().isoformat(),
+        instance_id=meta.instance_id,
+        explicit_locations=explicit_locations,
+        allow_discovery_fallback=True,
+    )
 
     webapp_query = f'{{namespace="{meta.namespace}", pod="{meta.webapp_pod}"}}'
     dispatcher_query = (

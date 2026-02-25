@@ -23,7 +23,16 @@ def test_analyze_live_fetches_and_persists_raw_data(monkeypatch, tmp_path):
         lambda process_id, token, concord_base_url: fixture_log,
     )
 
-    def _fake_fetch_reports(bucket, aws_profile, output_dir):
+    def _fake_fetch_reports(
+        bucket,
+        aws_profile,
+        output_dir,
+        prefix="",
+        process_date=None,
+        instance_id=None,
+        explicit_locations=None,
+        allow_discovery_fallback=True,
+    ):
         out = Path(output_dir)
         (out / "kono-report" / "data").mkdir(parents=True, exist_ok=True)
         (out / "substantiate-report" / "data").mkdir(parents=True, exist_ok=True)

@@ -90,6 +90,45 @@ def test_s3_fetch_reports_downloads_expected_paths(monkeypatch, tmp_path):
     assert any("cp" in c for cmd in calls for c in cmd)
 
 
+def test_s3_fetch_reports_scopes_listing_to_process_date(monkeypatch, tmp_path):
+    calls = []
+
+    class _RunResult:
+        def __init__(self, stdout: str):
+            self.stdout = stdout
+            self.stderr = ""
+
+    ls_for_day = "\n".join(
+        [
+            "2026-02-24 18:00:00      10 2026-02-24/kono-report/data/timeline.json",
+            "2026-02-24 18:00:00      10 2026-02-24/substantiate-report/data/timeline.json",
+        ]
+    )
+
+    def _fake_run(cmd, check, capture_output, text):
+        calls.append(cmd)
+        if cmd[:4] == ["aws", "--profile", "dev", "s3"] and cmd[4] == "ls":
+            target = cmd[5]
+            if target.endswith("/2026-02-24/"):
+                return _RunResult(ls_for_day)
+            return _RunResult("")
+        return _RunResult("")
+
+    monkeypatch.setattr(s3_reports.subprocess, "run", _fake_run)
+
+    _ = s3_reports.fetch_reports(
+        "bucket",
+        "dev",
+        str(tmp_path),
+        prefix="aep-dev",
+        process_date="2026-02-24",
+    )
+
+    ls_targets = [cmd[5] for cmd in calls if len(cmd) > 5 and cmd[4] == "ls"]
+    assert all("/aep-dev/" in target for target in ls_targets)
+    assert "s3://bucket/" not in ls_targets
+
+
 def test_loki_fetch_uses_cookie_and_query(monkeypatch):
     captured = {}
 
@@ -134,3 +173,45 @@ def test_prometheus_fetch_uses_cookie_and_query(monkeypatch):
     assert result["status"] == "success"
     assert "query=up" in captured["url"]
     assert captured["cookie"] == "grafana_session=session-token"
+
+
+def test_s3_locations_discovered_from_concord_logs():
+    text = """
+    upload: ... to s3://reports.dev.aetion.com/aep.dev.aetion.com/kono-integration/report-20260223-1359-08/data/timeline.json
+    upload: ... to s3://reports.dev.aetion.com/aep.dev.aetion.com/substantiate-e2e/report-20260223-1410-55/data/timeline.json
+    """
+    found = s3_reports.discover_locations_from_concord_logs([text])
+    assert found["kono-report"][0] == "reports.dev.aetion.com"
+    assert "kono-integration/report-20260223-1359-08" in found["kono-report"][1]
+    assert found["substantiate-report"][0] == "reports.dev.aetion.com"
+    assert "substantiate-e2e/report-20260223-1410-55" in found["substantiate-report"][1]
+
+
+def test_s3_locations_use_allure_report_context_and_dst_hint():
+    text = """
+    == ALLURE REPORT (SUBSTANTIATE) ==
+    Copy report to S3
+    dst: aep.dev.aetion.com/integration-tests/report-20260223-1410-55
+    upload: ... to s3://reports.dev.aetion.com/aep.dev.aetion.com/integration-tests/report-20260223-1410-55/data/timeline.json
+    == ALLURE REPORT (KONO) ==
+    dst: aep.dev.aetion.com/e2e-tests/report-20260223-1359-08
+    upload: ... to s3://reports.dev.aetion.com/aep.dev.aetion.com/e2e-tests/report-20260223-1359-08/data/timeline.json
+    """
+    found = s3_reports.discover_locations_from_concord_logs([text])
+    assert found["substantiate-report"][0] == "reports.dev.aetion.com"
+    assert "integration-tests/report-20260223-1410-55" in found["substantiate-report"][1]
+    assert found["kono-report"][0] == "reports.dev.aetion.com"
+    assert "e2e-tests/report-20260223-1359-08" in found["kono-report"][1]
+
+
+def test_extract_child_process_ids():
+    text = """
+    Started a process: <concord:instanceId>11111111-1111-1111-1111-111111111111</concord:instanceId>
+    Started a process: <concord:instanceId>22222222-2222-2222-2222-222222222222</concord:instanceId>
+    Started a process: <concord:instanceId>11111111-1111-1111-1111-111111111111</concord:instanceId>
+    """
+    child_ids = discovery.extract_child_process_ids(text)
+    assert child_ids == (
+        "11111111-1111-1111-1111-111111111111",
+        "22222222-2222-2222-2222-222222222222",
+    )
