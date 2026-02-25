@@ -54,6 +54,32 @@ WEBAPP      [startup ~warmup~][--- stable 0.3-0.5 CPU, 1.6GB mem -------->
             CPU peak 2.09c    HikariCP max 4 conn, zero pending
 ```
 
+I’m not sure where the 30 seconds came from based on the committed log:
+parent startup (from submitted to running) ~ 15 sec
+```
+2026-02-24T18:21:04.907+0000 [INFO ] Storing policy '[default-policy]' data
+2026-02-24T18:21:06.535+0000 [INFO ] Acquired by: k8s-agent concord/agentpool-dev1-b-default-00000 @ 10.13.49.27
+2026-02-24T18:21:12.361+0000 [INFO ] Repository data export took 5357ms
+2026-02-24T18:21:20.278+0000 [INFO ] Process status: RUNNING
+```
+
+first resume ~ 20 sec (e2e tests still running, this resume doesn’t affect the overall process time at all)
+```
+2026-02-24T18:29:41.906+0000 [INFO ] Storing policy '[default-policy]' data
+2026-02-24T18:29:58.292+0000 [INFO ] Acquired by: k8s-agent concord/agentpool-dev1-b-default-00000 @ 10.13.54.23
+2026-02-24T18:30:04.011+0000 [INFO ] Repository data export took 5204ms
+2026-02-24T18:30:11.537+0000 [INFO ] Process status: RUNNING
+```
+
+second/last resume ~9 sec 
+```
+2026-02-24T18:41:14.207+0000 [INFO ] Storing policy '[default-policy]' data
+2026-02-24T18:41:16.226+0000 [INFO ] Acquired by: k8s-agent concord/agentpool-dev1-b-default-00000 @ 10.13.54.23
+2026-02-24T18:41:16.922+0000 [INFO ] Repository data export took 648ms
+2026-02-24T18:41:23.025+0000 [INFO ] Process status: RUNNING
+```
+
+
 **Legend:** `[===]` active work, `[~~~]` idle/suspended, `[-->` continues, `|` phase boundary
 
 **Key observation:** The pipeline is fundamentally sequential: Concord orchestration must complete before tests begin. The ~18-minute orchestration phase — of which only 2m45s is active work — is the primary wall-clock bottleneck.
