@@ -68,6 +68,8 @@ WEBAPP      [startup ~warmup~][--- stable 0.3-0.5 CPU, 1.6GB mem -------->
 - **Estimated savings:** 60s
 - **Difficulty:** Low — cache or skip repo export on resume when no source changes occurred.
 - **Priority:** P1 — Pure waste with a straightforward fix.
+>> Saving 60 seconds isn’t possible in this case, because the parent resumes only when one of the child processes finishes. two child processes finishing at different times...
+>> So in the best case, the savings here would be 30 seconds (if resume were completely free)
 
 ### Rank 2: Parallelize Concord Child Checking
 - **Description:** The Concord parent checks children sequentially: it resumes for child c6cbe79e, confirms completion, re-suspends, then later resumes for 806f92a1. If both children are checked in a single resume, the second suspend/resume cycle (with its ~30s overhead) is eliminated entirely.
@@ -75,6 +77,7 @@ WEBAPP      [startup ~warmup~][--- stable 0.3-0.5 CPU, 1.6GB mem -------->
 - **Estimated savings:** 30-45s
 - **Difficulty:** Medium — requires changes to Concord's child-wait logic.
 - **Priority:** P1
+>> same here. two child processes finishing at different times...
 
 ### Rank 3: Reduce K8s Pod Startup Latency
 - **Description:** Dispatcher jobs wait 196s for pod scheduling and container startup before running 17s of actual work. This 10:1 overhead suggests opportunity in pod pre-warming, smaller container images, or a warm pool of dispatcher pods.
