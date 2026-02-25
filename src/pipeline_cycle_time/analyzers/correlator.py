@@ -152,13 +152,14 @@ def correlate(
             rank=6,
             title="Reduce Substantiate Polling Interval",
             description=(
-                f"Tests polling for backend compute completion use a 20s interval. "
-                f"With {polling['polling_pct']:.1f}% of aggregate time in long-running (polling) tests, "
-                f"reducing the interval to 5s would cut average overshoot from ~10s to ~2.5s."
+                f"Substantiate aggregate runtime is dominated by long-running compute waits; "
+                f"an inferred {polling['polling_pct']:.1f}% of aggregate time is in long-running (likely polling) tests. "
+                f"Precise polling-vs-non-polling attribution is not fully observable from fixtures alone. "
+                f"Reducing poll interval from 20s to 5s would cut average overshoot."
             ),
             evidence=(
                 f"{polling['polling_pct']:.1f}% of {polling['aggregate_min']:.1f} min aggregate time "
-                f"in long-running tests."
+                f"in long-running tests (inferred heuristic: tests >16s classified as polling-dominated)."
             ),
             estimated_savings_s="30-60s",
             difficulty="Low",

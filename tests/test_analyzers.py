@@ -25,7 +25,7 @@ class TestOrchestration:
     def test_idle_percentage(self, fixtures_dir):
         from pipeline_cycle_time.analyzers.orchestration import analyze
         result = analyze(os.path.join(fixtures_dir, "logs", "concord-log.txt"))
-        # Golden: 86.5% idle (we measure ~90%, includes resume overhead in suspended)
+        # Golden: ~89.8% idle (suspended time includes resume overhead)
         assert result.idle_pct > 85
 
     def test_children_detected(self, fixtures_dir):
@@ -36,11 +36,11 @@ class TestOrchestration:
         assert any("c6cbe79e" in c for c in result.children)
 
     def test_finding_1_resume_overhead(self, fixtures_dir):
-        """Finding 1: Concord resume overhead (~60s from redundant repo export + dep resolution)."""
+        """Finding 1: Concord resume overhead (~20s from redundant repo export + dep resolution)."""
         from pipeline_cycle_time.analyzers.orchestration import analyze
         result = analyze(os.path.join(fixtures_dir, "logs", "concord-log.txt"))
         assert result.resume_count == 2, "Should detect 2 resume cycles"
-        # Total overhead should be meaningful (golden says ~60s, actual data shows ~38s)
+        # Total overhead should be meaningful (golden says ~20s)
         assert result.total_resume_overhead_s > 15, (
             f"Resume overhead {result.total_resume_overhead_s}s is too low"
         )
@@ -170,9 +170,9 @@ class TestSubstantiateReports:
             "Substantiate"
         )
         polling = result.polling_analysis()
-        # Golden: 76.8% of aggregate time is compute wait/polling
+        # Golden: 76.8% of aggregate time is compute wait/polling (inferred heuristic)
         assert 75 < polling["polling_pct"] < 82, (
-            f"Polling percentage {polling['polling_pct']:.1f}% should be ~76.8%"
+            f"Polling percentage {polling['polling_pct']:.1f}% should be ~76.8% (inferred)"
         )
 
     def test_flaky_test_detected(self, fixtures_dir):

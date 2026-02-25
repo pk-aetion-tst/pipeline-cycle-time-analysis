@@ -52,11 +52,20 @@ def generate(
         f"overlapping test execution (Kono: {kono_dur}, Substantiate: {sub_dur})."
     )
     lines.append("")
+    total_pass = kono.pass_count + substantiate.pass_count
+    total_fail = kono.fail_count + substantiate.fail_count
+    total_skip = kono.skip_count + substantiate.skip_count
+    if total_fail == 0 and total_skip == 0:
+        outcome = f"**All {total_tests:,} tests passed**"
+    else:
+        outcome = (
+            f"Across {total_tests:,} total tests ({kono.total_tests:,} Kono + "
+            f"{substantiate.total_tests} Substantiate): "
+            f"**{total_pass:,} passed, {total_fail} failed, and {total_skip} skipped**"
+        )
     lines.append(
-        f"**All {total_tests:,} tests passed** ({kono.total_tests:,} Kono + "
-        f"{substantiate.total_tests} Substantiate), with a single Substantiate failure "
-        f"on a known-flaky test and {substantiate.skip_count} skips. "
-        f"The application itself showed no resource bottlenecks whatsoever during execution."
+        f"{outcome}. "
+        f"The application itself showed no resource bottlenecks during execution."
     )
     lines.append("")
 
@@ -151,7 +160,7 @@ def generate(
     lines.append(f"| Aggregate time | {substantiate.aggregate_s / 60:.1f} min |")
     polling = substantiate.polling_analysis()
     if polling:
-        lines.append(f"| Compute wait % | {polling['polling_pct']:.1f}% |")
+        lines.append(f"| Compute wait % | {polling['polling_pct']:.1f}% (inferred from aggregate durations) |")
     lines.append("")
 
     setup = substantiate.setup_phase_analysis()

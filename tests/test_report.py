@@ -45,6 +45,9 @@ class TestReportStructure:
 class TestReportContent:
     def test_total_tests_mentioned(self, generated_report):
         assert "1,501" in generated_report or "1501" in generated_report
+        # Should report accurate pass/fail/skip breakdown
+        assert "1,494 passed" in generated_report, "Should show correct pass count"
+        assert "All 1,501 tests passed" not in generated_report, "Should not claim all tests passed"
 
     def test_kono_test_count(self, generated_report):
         assert "1,245" in generated_report or "1245" in generated_report
