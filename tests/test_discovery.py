@@ -4,6 +4,7 @@ from pathlib import Path
 
 from pipeline_cycle_time.fetchers.discovery import (
     discover, discover_report_locations, PipelineMetadata, ReportLocation,
+    DeployedComponent,
 )
 
 
@@ -26,6 +27,11 @@ class TestDiscoveryFromFixture:
 
     def test_dispatcher_pod(self, meta):
         assert "dispatcher-batch-job-236757" in meta.dispatcher_pod
+
+    def test_deployed_components(self, meta):
+        labels = {c.label for c in meta.deployed_components}
+        assert "webapp" in labels
+        assert "dispatcher" in labels
 
     def test_s3_bucket(self, meta):
         assert meta.s3_bucket == "aep.dev.aetion.com"
@@ -97,6 +103,31 @@ class TestDiscoverySynthetic:
         meta = discover(log)
         duration_s = (meta.end_epoch_ns - meta.start_epoch_ns) / 1e9
         assert duration_s == pytest.approx(600.0, abs=1.0)
+
+    def test_deployed_components_from_monitoring_urls(self):
+        log = (
+            '<https://monitoring.dev.example.com/d/ptfAcf04z?var-namespace=aep'
+            '&var-pod=unified-homepage-d5f74bdd9-h8rlt&from=123&to=456|unified-homepage>\n'
+            '<https://monitoring.dev.example.com/d/ptfAcf04z?var-namespace=aep'
+            '&var-pod=discover-68fb747b5b-nqlk7&from=123&to=456|discover>\n'
+            '<https://monitoring.dev.example.com/d/ptfAcf04z?var-namespace=aep'
+            '&var-pod=fe-aep-56c794d5bb-2xprt&from=123&to=456|fe-aep>\n'
+        )
+        meta = discover(log)
+        labels = {c.label for c in meta.deployed_components}
+        assert labels == {"unified-homepage", "discover", "fe-aep"}
+        assert meta.grafana_base_url == "https://monitoring.dev.example.com"
+        # webapp_pod/dispatcher_pod convenience properties return "" when not present
+        assert meta.webapp_pod == ""
+        assert meta.dispatcher_pod == ""
+
+    def test_deployed_components_deduplicates(self):
+        log = (
+            '<https://monitoring.example.com/d/x?var-pod=webapp-abc123&from=1|webapp>\n'
+            '<https://monitoring.example.com/d/x?var-pod=webapp-abc123&from=2|webapp>\n'
+        )
+        meta = discover(log)
+        assert len(meta.deployed_components) == 1
 
     def test_children_extraction(self):
         log = (

@@ -22,7 +22,11 @@ def _get_keychain_token() -> str:
     return result.stdout.strip()
 
 
-def fetch_log(process_id: str, token: str | None = None) -> str:
+def fetch_log(
+    process_id: str,
+    token: str | None = None,
+    base_url: str = CONCORD_BASE_URL,
+) -> str:
     """Fetch Concord process log via API.
 
     Uses: GET /api/v1/process/{id}/log
@@ -32,7 +36,7 @@ def fetch_log(process_id: str, token: str | None = None) -> str:
     if not token:
         token = _get_keychain_token()
 
-    url = f"{CONCORD_BASE_URL}/api/v1/process/{process_id}/log"
+    url = f"{base_url}/api/v1/process/{process_id}/log"
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}",
         "Accept": "text/plain",
