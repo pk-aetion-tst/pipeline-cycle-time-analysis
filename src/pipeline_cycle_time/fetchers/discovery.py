@@ -116,6 +116,23 @@ def discover(log_text: str) -> PipelineMetadata:
     return meta
 
 
+def get_child_end_epoch_s(child_log: str) -> float:
+    """Extract the last timestamp from a child process log as epoch seconds.
+
+    This represents when the child Concord process actually finished,
+    which is later than when tests completed (due to GHA job teardown,
+    report upload, webhook delivery, etc.).
+    """
+    last_ts = None
+    for line in child_log.splitlines():
+        m = TIMESTAMP_RE.match(line.strip())
+        if m:
+            last_ts = _parse_ts(m.group(1))
+    if last_ts:
+        return last_ts.timestamp()
+    return 0.0
+
+
 def discover_report_locations(
     child_id: str,
     child_log: str,
