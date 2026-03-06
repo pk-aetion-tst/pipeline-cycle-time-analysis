@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -9,8 +10,14 @@ from .analyzers import orchestration, test_reports, app_logs, metrics, correlato
 from .report import generator
 
 
-def analyze_fixtures(fixtures_dir: str, output: str | None = None) -> str:
+def analyze_fixtures(
+    fixtures_dir: str,
+    output: str | None = None,
+    children_end_epoch_s: float = 0.0,
+) -> str:
     """Run analysis against local fixture data."""
+    from .fetchers.discovery import get_child_end_epoch_s
+
     d = Path(fixtures_dir)
 
     # Analyze orchestration
@@ -31,9 +38,18 @@ def analyze_fixtures(fixtures_dir: str, output: str | None = None) -> str:
     # Analyze metrics
     metrics_result = metrics.analyze(str(d / "metrics"))
 
+    # If child logs exist in the output dir, use them for accurate polling delay
+    if children_end_epoch_s == 0.0:
+        child_logs = sorted((d / "logs").glob("child-*.txt"))
+        for cl in child_logs:
+            end_s = get_child_end_epoch_s(cl.read_text())
+            if end_s > children_end_epoch_s:
+                children_end_epoch_s = end_s
+
     # Correlate findings (includes critical-path analysis)
     correlation = correlator.correlate(
-        orch_result, kono, substantiate, app_logs_result, dispatcher_result, metrics_result
+        orch_result, kono, substantiate, app_logs_result, dispatcher_result,
+        metrics_result, children_end_epoch_s=children_end_epoch_s,
     )
 
     # Generate report
@@ -49,6 +65,181 @@ def analyze_fixtures(fixtures_dir: str, output: str | None = None) -> str:
         print(report)
 
     return report
+
+
+def analyze_live(
+    process_id: str,
+    output: str | None = None,
+    output_dir: str | None = None,
+    grafana_cookie: str | None = None,
+    grafana_token: str | None = None,
+    aws_profile: str = "dev",
+) -> str:
+    """Run analysis by fetching live data from production APIs."""
+    from .fetchers import concord, discovery, loki, prometheus as prom, s3_reports
+    from .fetchers.prometheus import METRIC_QUERIES, DISPATCHER_QUERIES
+
+    if not grafana_cookie and not grafana_token:
+        print("Error: --grafana-cookie or --grafana-token is required for live mode",
+              file=sys.stderr)
+        sys.exit(1)
+
+    grafana_auth = {"grafana_cookie": grafana_cookie, "grafana_token": grafana_token}
+
+    # Set up output directory
+    out = Path(output_dir or f"output/{process_id}")
+    out.mkdir(parents=True, exist_ok=True)
+
+    # 1. Fetch Concord log
+    print(f"Fetching Concord log for process {process_id}...", file=sys.stderr)
+    log_text = concord.fetch_log(process_id)
+    log_dir = out / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "concord-log.txt").write_text(log_text)
+
+    # 2. Discover metadata from log
+    meta = discovery.discover(log_text)
+    if not meta.namespace:
+        print("Error: could not extract namespace from Concord log", file=sys.stderr)
+        sys.exit(1)
+
+    grafana_base_url = meta.grafana_base_url or loki.GRAFANA_BASE_URL
+    print(f"  namespace={meta.namespace}  webapp={meta.webapp_pod}  "
+          f"dispatcher={meta.dispatcher_pod}", file=sys.stderr)
+
+    # 3. Fetch child process logs and discover S3 report locations + end times
+    report_locations = []
+    children_end_epoch_s = 0.0
+    for child_id in meta.children:
+        print(f"Fetching child process log {child_id[:8]}...", file=sys.stderr)
+        try:
+            child_log = concord.fetch_log(child_id)
+            (log_dir / f"child-{child_id[:8]}.txt").write_text(child_log)
+            report_locations.extend(
+                discovery.discover_report_locations(child_id, child_log)
+            )
+            child_end = discovery.get_child_end_epoch_s(child_log)
+            if child_end > children_end_epoch_s:
+                children_end_epoch_s = child_end
+        except Exception as e:
+            print(f"  Warning: failed to fetch child {child_id[:8]}: {e}",
+                  file=sys.stderr)
+
+    if report_locations:
+        print(f"Discovered {len(report_locations)} report(s) from child logs:",
+              file=sys.stderr)
+        for rl in report_locations:
+            print(f"  {rl.report_name} → {rl.s3_uri}", file=sys.stderr)
+
+    # 4. Fetch S3 reports (from discovered locations or fallback)
+    if report_locations:
+        for rl in report_locations:
+            try:
+                s3_reports.fetch_report(
+                    rl.s3_uri, rl.report_name, aws_profile, str(out),
+                )
+            except RuntimeError as e:
+                print(f"Warning: {rl.report_name} fetch failed: {e}",
+                      file=sys.stderr)
+    elif meta.s3_folder:
+        print(f"No reports found in child logs, falling back to "
+              f"s3://{s3_reports.REPORTS_BUCKET}/{meta.s3_folder}/...",
+              file=sys.stderr)
+        try:
+            s3_reports.fetch_reports(meta.s3_folder, aws_profile, str(out))
+        except RuntimeError as e:
+            print(f"Warning: S3 report fetch failed: {e}", file=sys.stderr)
+    else:
+        print("Warning: could not determine S3 report locations", file=sys.stderr)
+
+    # 5. Fetch Loki logs (webapp + dispatcher)
+    if meta.webapp_pod:
+        print(f"Fetching webapp logs...", file=sys.stderr)
+        try:
+            webapp_data = loki.fetch_logs(
+                namespace=meta.namespace,
+                pod_selector=meta.webapp_pod,
+                start_ns=meta.start_epoch_ns,
+                end_ns=meta.end_epoch_ns,
+                grafana_base_url=grafana_base_url,
+                **grafana_auth,
+            )
+            (log_dir / "webapp-logs.json").write_text(json.dumps(webapp_data))
+        except Exception as e:
+            print(f"Warning: webapp log fetch failed: {e}", file=sys.stderr)
+            (log_dir / "webapp-logs.json").write_text(
+                '{"status":"success","data":{"resultType":"streams","result":[]}}'
+            )
+    else:
+        print("Warning: no webapp pod found, skipping webapp logs", file=sys.stderr)
+        (log_dir / "webapp-logs.json").write_text(
+            '{"status":"success","data":{"resultType":"streams","result":[]}}'
+        )
+
+    if meta.dispatcher_pod:
+        print(f"Fetching dispatcher logs...", file=sys.stderr)
+        # Use regex to match all pods for this dispatcher job
+        dispatcher_selector = meta.dispatcher_pod
+        try:
+            disp_data = loki.fetch_logs(
+                namespace=meta.namespace,
+                pod_selector=dispatcher_selector,
+                start_ns=meta.start_epoch_ns,
+                end_ns=meta.end_epoch_ns,
+                grafana_base_url=grafana_base_url,
+                **grafana_auth,
+            )
+            (log_dir / "dispatcher-logs.json").write_text(json.dumps(disp_data))
+        except Exception as e:
+            print(f"Warning: dispatcher log fetch failed: {e}", file=sys.stderr)
+            (log_dir / "dispatcher-logs.json").write_text(
+                '{"status":"success","data":{"resultType":"streams","result":[]}}'
+            )
+    else:
+        print("Warning: no dispatcher pod found, skipping dispatcher logs",
+              file=sys.stderr)
+        (log_dir / "dispatcher-logs.json").write_text(
+            '{"status":"success","data":{"resultType":"streams","result":[]}}'
+        )
+
+    # 6. Fetch Prometheus metrics
+    metrics_dir = out / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+
+    start_s = meta.start_epoch_s
+    end_s = meta.end_epoch_s
+
+    # Webapp metrics
+    if meta.webapp_pod:
+        print(f"Fetching webapp metrics...", file=sys.stderr)
+        for query_tpl, filename, desc in METRIC_QUERIES:
+            query = query_tpl.format(namespace=meta.namespace, pod=meta.webapp_pod)
+            try:
+                data = prom.fetch_metric(
+                    query=query, start_s=start_s, end_s=end_s,
+                    grafana_base_url=grafana_base_url, **grafana_auth,
+                )
+                (metrics_dir / filename).write_text(json.dumps(data))
+            except Exception as e:
+                print(f"  Warning: {desc} fetch failed: {e}", file=sys.stderr)
+
+    # Dispatcher metrics
+    if meta.dispatcher_pod:
+        print(f"Fetching dispatcher metrics...", file=sys.stderr)
+        for query_tpl, filename, desc in DISPATCHER_QUERIES:
+            query = query_tpl.format(namespace=meta.namespace, pod=meta.dispatcher_pod)
+            try:
+                data = prom.fetch_metric(
+                    query=query, start_s=start_s, end_s=end_s,
+                    grafana_base_url=grafana_base_url, **grafana_auth,
+                )
+                (metrics_dir / filename).write_text(json.dumps(data))
+            except Exception as e:
+                print(f"  Warning: {desc} fetch failed: {e}", file=sys.stderr)
+
+    # 7. Run analysis on fetched data
+    print("Running analysis...", file=sys.stderr)
+    return analyze_fixtures(str(out), output, children_end_epoch_s=children_end_epoch_s)
 
 
 def main() -> None:
@@ -71,8 +262,17 @@ def main() -> None:
         help="Grafana session cookie (live mode)",
     )
     analyze_cmd.add_argument(
+        "--grafana-token",
+        help="Grafana service account token (preferred over --grafana-cookie)",
+    )
+    analyze_cmd.add_argument(
         "--aws-profile",
-        help="AWS profile name (live mode)",
+        default="dev",
+        help="AWS profile name (live mode, default: dev)",
+    )
+    analyze_cmd.add_argument(
+        "--output-dir",
+        help="Directory to save raw fetched data (default: output/<process-id>/)",
     )
     analyze_cmd.add_argument(
         "--output", "-o",
@@ -88,8 +288,14 @@ def main() -> None:
     if args.fixtures_dir:
         analyze_fixtures(args.fixtures_dir, args.output)
     elif args.process_id:
-        print("Live mode not yet implemented in v0.1", file=sys.stderr)
-        sys.exit(1)
+        analyze_live(
+            process_id=args.process_id,
+            output=args.output,
+            output_dir=args.output_dir,
+            grafana_cookie=args.grafana_cookie,
+            grafana_token=args.grafana_token,
+            aws_profile=args.aws_profile,
+        )
     else:
         print("Either --fixtures-dir or --process-id is required", file=sys.stderr)
         sys.exit(1)
