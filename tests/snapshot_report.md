@@ -32,9 +32,9 @@ Across 1,501 total tests (1,245 Kono + 256 Substantiate): **1,494 passed, 1 fail
 Time (UTC)  18:21    +5m      +10m     +15m     +20m     +25m     +30m     +35m
             |--------|--------|--------|--------|--------|--------|--------|
 
-CONCORD     [Init|Bootstrap|AWS|Config|Helm]
+CONCORD     [Init|Bootstrap|AWS|Config|Helm][====== SUSPENDED 18m30s ======]
   (20m26s)  |2.0s|16.3s|2.9s|16.9s|1m14s|
-                                             [SUSPENDED ~~~~~~~~~~~~~~~~]
+             active 1m56s                    waiting for children
                                               wait c6cbe79e   wait 806f92a1
 
 K8S DEPLOY                               [--- pod startup ---][17s]

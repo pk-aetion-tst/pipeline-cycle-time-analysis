@@ -267,13 +267,16 @@ def _write_timeline(
 
     # Concord phases
     concord_dur = _fmt_duration(orchestration.total_duration_s)
-    lines.append(f"CONCORD     [Init|Bootstrap|AWS|Config|Helm]")
+    active_s = orchestration.total_duration_s - orchestration.suspended_duration_s
+    active_dur = _fmt_duration(active_s)
+    suspended_dur = _fmt_duration(orchestration.suspended_duration_s)
     phase_strs = []
     for p in orchestration.phases:
         if p.name != "Suspended":
             phase_strs.append(f"{_fmt_duration(p.duration_s)}")
+    lines.append(f"CONCORD     [Init|Bootstrap|AWS|Config|Helm][====== SUSPENDED {suspended_dur} ======]")
     lines.append(f"  ({concord_dur})  |{'|'.join(phase_strs)}|")
-    lines.append(f"                                             [SUSPENDED ~~~~~~~~~~~~~~~~]")
+    lines.append(f"             active {active_dur}                    waiting for children")
     if orchestration.children:
         child_strs = "   ".join(f"wait {c[:8]}" for c in orchestration.children[:2])
         lines.append(f"                                              {child_strs}")
