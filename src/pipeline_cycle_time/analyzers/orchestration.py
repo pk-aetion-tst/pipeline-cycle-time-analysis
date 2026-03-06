@@ -28,6 +28,7 @@ class ResumeOverhead:
     resume_time: datetime
     repo_export_s: float
     dep_resolution_s: float
+    on_critical_path: bool = False
 
     @property
     def total_s(self) -> float:
@@ -70,8 +71,22 @@ class OrchestrationResult:
         return sum(r.total_s for r in self.resume_overheads)
 
     @property
+    def critical_path_resume_overhead_s(self) -> float:
+        return sum(r.total_s for r in self.resume_overheads if r.on_critical_path)
+
+    @property
     def resume_count(self) -> int:
         return len(self.resume_overheads)
+
+    def mark_critical_path(self, test_end_epoch_s: float) -> None:
+        """Mark which resume cycles are on the critical path.
+
+        A resume cycle is on the critical path only if it starts after all
+        test suites have finished. Resumes that overlap with running tests
+        do not extend end-to-end wall-clock time.
+        """
+        for r in self.resume_overheads:
+            r.on_critical_path = r.resume_time.timestamp() >= test_end_epoch_s
 
 
 def _parse_ts(s: str) -> datetime:

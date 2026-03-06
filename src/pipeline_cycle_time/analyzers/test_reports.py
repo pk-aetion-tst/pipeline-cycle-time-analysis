@@ -89,12 +89,22 @@ class TestSuiteResult:
         return len(self.tests)
 
     @property
+    def start_epoch_s(self) -> float:
+        if not self.tests:
+            return 0.0
+        return min(t.start for t in self.tests) / 1000.0
+
+    @property
+    def end_epoch_s(self) -> float:
+        if not self.tests:
+            return 0.0
+        return max(t.stop for t in self.tests) / 1000.0
+
+    @property
     def wall_clock_s(self) -> float:
         if not self.tests:
             return 0.0
-        start = min(t.start for t in self.tests)
-        stop = max(t.stop for t in self.tests)
-        return (stop - start) / 1000.0
+        return self.end_epoch_s - self.start_epoch_s
 
     @property
     def aggregate_s(self) -> float:
@@ -232,7 +242,7 @@ def analyze_test_cases(test_cases_dir: str) -> list[dict]:
     p = Path(test_cases_dir)
     if not p.exists():
         return cases
-    for f in p.glob("*.json"):
+    for f in sorted(p.glob("*.json")):
         with open(f) as fh:
             data = json.load(fh)
         labels = {l["name"]: l["value"] for l in data.get("labels", [])}
