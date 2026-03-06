@@ -14,15 +14,15 @@ Across 1,499 total tests (1,240 Kono + 259 Substantiate): **1,495 passed, 0 fail
 
 ### Top Findings
 
-1. **Reduce Concord Resume Overhead.** Each Concord resume redundantly re-exports the repository and re-resolves dependencies. Per-cycle overhead: resume 1: 7s (overlaps with running tests); resume 2: 8s (on critical path). Total overhead: 16s, but only 8s is on the critical path (resumes overlapping with test execution are free).
+1. **Parallelize Substantiate Setup Chain.** The first 340s of Substantiate execution is a mostly-sequential setup chain. Only 37 tests run, while 0 workers sit idle.
 
-2. **Reduce Concord Suspend Polling Delay.** After all tests completed, the Concord parent remained suspended for 51s before resuming. This gap is Concord's internal polling interval and is pure wall-clock waste.
+3. **Run Kono ForkJoinPools Concurrently.** Pool-1 (185 tests, 282.0s) and Pool-2 (1055 tests, 43.8s) execute sequentially. Running them concurrently would save ~44s.
 
-3. **Parallelize Concord Child Checking.** The Concord parent checks 2 children in separate suspend/resume cycles. 1 of 2 resumes overlap with test execution and do not affect wall-clock. Checking all children in a single resume would eliminate redundant cycles.
+4. **Reduce Concord Suspend Polling Delay.** After all tests completed, the Concord parent remained suspended for 51s before resuming. This gap is Concord's internal polling interval and is pure wall-clock waste.
 
-5. **Run Kono ForkJoinPools Concurrently.** Pool-1 (185 tests, 282.0s) and Pool-2 (1055 tests, 43.8s) execute sequentially. Running them concurrently would save ~44s.
+5. **Reduce Substantiate Polling Interval.** Substantiate aggregate runtime is dominated by long-running compute waits; an inferred 76.8% of aggregate time is in long-running (likely polling) tests. Precise polling-vs-non-polling attribution is not fully observable from fixtures alone. Reducing poll interval from 20s to 5s would cut average overshoot.
 
-6. **Parallelize Substantiate Setup Chain.** The first 340s of Substantiate execution is a mostly-sequential setup chain. Only 37 tests run, while 0 workers sit idle.
+6. **Reduce Concord Resume Overhead.** Each Concord resume redundantly re-exports the repository and re-resolves dependencies. Per-cycle overhead: resume 1: 7s (overlaps with running tests); resume 2: 8s (on critical path). Total overhead: 16s, but only 8s is on the critical path (resumes overlapping with test execution are free).
 
 ---
 
@@ -55,46 +55,46 @@ WEBAPP      [startup ~warmup~][--- stable 0.0-0.2 CPU, 1.9GB mem -------->
 
 ## 3. Ranked Optimization Opportunities
 
-### Rank 1: Reduce Concord Resume Overhead
-- **Description:** Each Concord resume redundantly re-exports the repository and re-resolves dependencies. Per-cycle overhead: resume 1: 7s (overlaps with running tests); resume 2: 8s (on critical path). Total overhead: 16s, but only 8s is on the critical path (resumes overlapping with test execution are free).
-- **Evidence:** Concord logs show 2 resume cycles. Only cycles after test completion (epoch 1772804892) extend wall-clock.
-- **Estimated savings:** 8s
+### Rank 1: Parallelize Substantiate Setup Chain
+- **Description:** The first 340s of Substantiate execution is a mostly-sequential setup chain. Only 37 tests run, while 0 workers sit idle.
+- **Evidence:** Only 37 tests in first 340s. Workers ... idle for 300+ seconds.
+- **Estimated savings:** 100-170s
+- **Difficulty:** Medium
+- **Priority:** P1
+
+### Rank 3: Run Kono ForkJoinPools Concurrently
+- **Description:** Pool-1 (185 tests, 282.0s) and Pool-2 (1055 tests, 43.8s) execute sequentially. Running them concurrently would save ~44s.
+- **Evidence:** Pool-2 starts after Pool-1 ends. Pool-2 parallelism: 7.02x.
+- **Estimated savings:** ~44s
 - **Difficulty:** Low
 - **Priority:** P1
 
-### Rank 2: Reduce Concord Suspend Polling Delay
+### Rank 4: Reduce Concord Suspend Polling Delay
 - **Description:** After all tests completed, the Concord parent remained suspended for 51s before resuming. This gap is Concord's internal polling interval and is pure wall-clock waste.
 - **Evidence:** Tests ended at 1772804892 epoch, parent resumed at 1772804943 epoch (51s gap).
 - **Estimated savings:** 51s
 - **Difficulty:** Medium
 - **Priority:** P1
 
-### Rank 3: Parallelize Concord Child Checking
-- **Description:** The Concord parent checks 2 children in separate suspend/resume cycles. 1 of 2 resumes overlap with test execution and do not affect wall-clock. Checking all children in a single resume would eliminate redundant cycles.
-- **Evidence:** 2 suspend/resume cycles, 1 overlapping with tests.
-- **Estimated savings:** 0-9s
-- **Difficulty:** Medium
-- **Priority:** P2
-
-### Rank 5: Run Kono ForkJoinPools Concurrently
-- **Description:** Pool-1 (185 tests, 282.0s) and Pool-2 (1055 tests, 43.8s) execute sequentially. Running them concurrently would save ~44s.
-- **Evidence:** Pool-2 starts after Pool-1 ends. Pool-2 parallelism: 7.02x.
-- **Estimated savings:** ~44s
-- **Difficulty:** Low
-- **Priority:** P2
-
-### Rank 6: Parallelize Substantiate Setup Chain
-- **Description:** The first 340s of Substantiate execution is a mostly-sequential setup chain. Only 37 tests run, while 0 workers sit idle.
-- **Evidence:** Only 37 tests in first 340s. Workers ... idle for 300+ seconds.
-- **Estimated savings:** 100-170s
-- **Difficulty:** Medium
-- **Priority:** P2
-
-### Rank 7: Reduce Substantiate Polling Interval
+### Rank 5: Reduce Substantiate Polling Interval
 - **Description:** Substantiate aggregate runtime is dominated by long-running compute waits; an inferred 76.8% of aggregate time is in long-running (likely polling) tests. Precise polling-vs-non-polling attribution is not fully observable from fixtures alone. Reducing poll interval from 20s to 5s would cut average overshoot.
 - **Evidence:** 76.8% of 118.1 min aggregate time in long-running tests (inferred heuristic: tests >16s classified as polling-dominated).
 - **Estimated savings:** 30-60s
 - **Difficulty:** Low
+- **Priority:** P1
+
+### Rank 6: Reduce Concord Resume Overhead
+- **Description:** Each Concord resume redundantly re-exports the repository and re-resolves dependencies. Per-cycle overhead: resume 1: 7s (overlaps with running tests); resume 2: 8s (on critical path). Total overhead: 16s, but only 8s is on the critical path (resumes overlapping with test execution are free).
+- **Evidence:** Concord logs show 2 resume cycles. Only cycles after test completion (epoch 1772804892) extend wall-clock.
+- **Estimated savings:** 8s
+- **Difficulty:** Low
+- **Priority:** P2
+
+### Rank 7: Parallelize Concord Child Checking
+- **Description:** The Concord parent checks 2 children in separate suspend/resume cycles. 1 of 2 resumes overlap with test execution and do not affect wall-clock. Checking all children in a single resume would eliminate redundant cycles.
+- **Evidence:** 2 suspend/resume cycles, 1 overlapping with tests.
+- **Estimated savings:** 0-9s
+- **Difficulty:** Medium
 - **Priority:** P2
 
 ### Rank 8: Application Has Massive Resource Headroom
@@ -170,19 +170,19 @@ Ordered by impact-to-effort ratio (highest first).
 
 ### Quick Wins (implement this sprint)
 
-1. **Reduce Concord Resume Overhead.** Each Concord resume redundantly re-exports the repository and re-resolves dependencies. Per-cycle overhead: resume 1: 7s (overlaps with running tests); resume 2: 8s (on critical path). Total overhead: 16s, but only 8s is on the critical path (resumes overlapping with test execution are free).
+1. **Run Kono ForkJoinPools Concurrently.** Pool-1 (185 tests, 282.0s) and Pool-2 (1055 tests, 43.8s) execute sequentially. Running them concurrently would save ~44s.
 
-2. **Run Kono ForkJoinPools Concurrently.** Pool-1 (185 tests, 282.0s) and Pool-2 (1055 tests, 43.8s) execute sequentially. Running them concurrently would save ~44s.
+2. **Reduce Substantiate Polling Interval.** Substantiate aggregate runtime is dominated by long-running compute waits; an inferred 76.8% of aggregate time is in long-running (likely polling) tests. Precise polling-vs-non-polling attribution is not fully observable from fixtures alone. Reducing poll interval from 20s to 5s would cut average overshoot.
 
-3. **Reduce Substantiate Polling Interval.** Substantiate aggregate runtime is dominated by long-running compute waits; an inferred 76.8% of aggregate time is in long-running (likely polling) tests. Precise polling-vs-non-polling attribution is not fully observable from fixtures alone. Reducing poll interval from 20s to 5s would cut average overshoot.
+3. **Reduce Concord Resume Overhead.** Each Concord resume redundantly re-exports the repository and re-resolves dependencies. Per-cycle overhead: resume 1: 7s (overlaps with running tests); resume 2: 8s (on critical path). Total overhead: 16s, but only 8s is on the critical path (resumes overlapping with test execution are free).
 
 ### Medium-Term (next 1-2 sprints)
 
-4. **Reduce Concord Suspend Polling Delay.** After all tests completed, the Concord parent remained suspended for 51s before resuming. This gap is Concord's internal polling interval and is pure wall-clock waste.
+4. **Parallelize Substantiate Setup Chain.** The first 340s of Substantiate execution is a mostly-sequential setup chain. Only 37 tests run, while 0 workers sit idle.
 
-5. **Parallelize Concord Child Checking.** The Concord parent checks 2 children in separate suspend/resume cycles. 1 of 2 resumes overlap with test execution and do not affect wall-clock. Checking all children in a single resume would eliminate redundant cycles.
+5. **Reduce Concord Suspend Polling Delay.** After all tests completed, the Concord parent remained suspended for 51s before resuming. This gap is Concord's internal polling interval and is pure wall-clock waste.
 
-6. **Parallelize Substantiate Setup Chain.** The first 340s of Substantiate execution is a mostly-sequential setup chain. Only 37 tests run, while 0 workers sit idle.
+6. **Parallelize Concord Child Checking.** The Concord parent checks 2 children in separate suspend/resume cycles. 1 of 2 resumes overlap with test execution and do not affect wall-clock. Checking all children in a single resume would eliminate redundant cycles.
 
 ### Longer-Term (backlog)
 
