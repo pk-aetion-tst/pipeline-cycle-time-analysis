@@ -42,36 +42,68 @@ def correlate(
     # Mark which resume cycles are on the critical path
     orchestration.mark_critical_path(test_end_epoch_s)
 
-    # Finding 1: Concord resume overhead (critical-path-aware)
-    if orchestration.resume_overheads:
-        total_overhead = orchestration.total_resume_overhead_s
-        critical_overhead = orchestration.critical_path_resume_overhead_s
-        cycle_details = []
-        for i, r in enumerate(orchestration.resume_overheads, 1):
-            path_label = "on critical path" if r.on_critical_path else "overlaps with running tests"
-            cycle_details.append(f"resume {i}: {r.total_s:.0f}s ({path_label})")
-
+    # Finding 1: Substantiate setup phase serialization (100-170s)
+    setup = substantiate.setup_phase_analysis(threshold_s=340.0)
+    if setup:
         findings.append(Finding(
             rank=1,
-            title="Reduce Concord Resume Overhead",
+            title="Parallelize Substantiate Setup Chain",
             description=(
-                f"Each Concord resume redundantly re-exports the repository and "
-                f"re-resolves dependencies. Per-cycle overhead: {'; '.join(cycle_details)}. "
-                f"Total overhead: {total_overhead:.0f}s, but only {critical_overhead:.0f}s "
-                f"is on the critical path (resumes overlapping with test execution are free)."
+                f"The first {setup['setup_duration_s']:.0f}s of Substantiate execution is a "
+                f"mostly-sequential setup chain. Only {setup['setup_tests']} tests run, "
+                f"while {setup['idle_workers']} workers sit idle."
             ),
             evidence=(
-                f"Concord logs show {len(orchestration.resume_overheads)} resume cycles. "
-                f"Only cycles after test completion (epoch {test_end_epoch_s:.0f}) extend wall-clock."
+                f"Only {setup['setup_tests']} tests in first {setup['setup_duration_s']:.0f}s. "
+                f"Workers {', '.join(setup['idle_worker_names'][:3])}... idle for 300+ seconds."
             ),
-            estimated_savings_s=f"{critical_overhead:.0f}s",
-            difficulty="Low",
-            priority="P1" if critical_overhead > 0 else "P3",
+            estimated_savings_s="100-170s",
+            difficulty="Medium",
+            priority="P1",
         ))
 
-    # Finding 2: Concord polling delay (gap between test end and next resume)
-    # This is the real wall-clock waste: the time Concord spends sleeping
-    # between its last child finishing and the parent noticing.
+    # Finding 2: K8s pod startup latency (60-120s)
+    if dispatcher.job_id:
+        compute_s = dispatcher.total_duration_s
+        findings.append(Finding(
+            rank=2,
+            title="Reduce K8s Pod Startup Latency",
+            description=(
+                f"Dispatcher job {dispatcher.job_id} pod took significant time from scheduling "
+                f"to first log, but only {compute_s:.0f}s of actual compute. "
+                f"This overhead suggests opportunity in pod pre-warming or smaller container images."
+            ),
+            evidence=f"Job {dispatcher.job_id} pod: {compute_s:.0f}s compute time.",
+            estimated_savings_s="60-120s",
+            difficulty="Medium",
+            priority="P1",
+        ))
+
+    # Finding 3: Kono sequential ForkJoinPools (~44-58s)
+    if len(kono.pools) >= 2:
+        sorted_pools = sorted(kono.pools.values(), key=lambda p: p.start_ms)
+        later_pool = sorted_pools[-1]
+        if later_pool.start_ms > sorted_pools[0].stop_ms:
+            waste = later_pool.wall_clock_s
+            findings.append(Finding(
+                rank=3,
+                title="Run Kono ForkJoinPools Concurrently",
+                description=(
+                    f"{sorted_pools[0].name} ({sorted_pools[0].count} tests, "
+                    f"{sorted_pools[0].wall_clock_s:.1f}s) and "
+                    f"{later_pool.name} ({later_pool.count} tests, {later_pool.wall_clock_s:.1f}s) "
+                    f"execute sequentially. Running them concurrently would save ~{waste:.0f}s."
+                ),
+                evidence=(
+                    f"{later_pool.name} starts after {sorted_pools[0].name} ends. "
+                    f"{later_pool.name} parallelism: {later_pool.parallelism:.2f}x."
+                ),
+                estimated_savings_s=f"~{waste:.0f}s",
+                difficulty="Low",
+                priority="P1",
+            ))
+
+    # Finding 4: Concord polling delay (51-56s)
     if orchestration.resume_overheads and test_end_epoch_s > 0:
         critical_resumes = [r for r in orchestration.resume_overheads if r.on_critical_path]
         if critical_resumes:
@@ -79,7 +111,7 @@ def correlate(
             polling_gap_s = last_resume.resume_time.timestamp() - test_end_epoch_s
             if polling_gap_s > 5:
                 findings.append(Finding(
-                    rank=2,
+                    rank=4,
                     title="Reduce Concord Suspend Polling Delay",
                     description=(
                         f"After all tests completed, the Concord parent remained suspended "
@@ -96,11 +128,59 @@ def correlate(
                     priority="P1",
                 ))
 
-    # Finding 3: Sequential child checking
+    # Finding 5: Substantiate polling interval (30-60s)
+    polling = substantiate.polling_analysis()
+    if polling and polling["polling_pct"] > 50:
+        findings.append(Finding(
+            rank=5,
+            title="Reduce Substantiate Polling Interval",
+            description=(
+                f"Substantiate aggregate runtime is dominated by long-running compute waits; "
+                f"an inferred {polling['polling_pct']:.1f}% of aggregate time is in long-running (likely polling) tests. "
+                f"Precise polling-vs-non-polling attribution is not fully observable from fixtures alone. "
+                f"Reducing poll interval from 20s to 5s would cut average overshoot."
+            ),
+            evidence=(
+                f"{polling['polling_pct']:.1f}% of {polling['aggregate_min']:.1f} min aggregate time "
+                f"in long-running tests (inferred heuristic: tests >16s classified as polling-dominated)."
+            ),
+            estimated_savings_s="30-60s",
+            difficulty="Low",
+            priority="P1",
+        ))
+
+    # Finding 6: Concord resume overhead (8-9s on critical path)
+    if orchestration.resume_overheads:
+        total_overhead = orchestration.total_resume_overhead_s
+        critical_overhead = orchestration.critical_path_resume_overhead_s
+        cycle_details = []
+        for i, r in enumerate(orchestration.resume_overheads, 1):
+            path_label = "on critical path" if r.on_critical_path else "overlaps with running tests"
+            cycle_details.append(f"resume {i}: {r.total_s:.0f}s ({path_label})")
+
+        findings.append(Finding(
+            rank=6,
+            title="Reduce Concord Resume Overhead",
+            description=(
+                f"Each Concord resume redundantly re-exports the repository and "
+                f"re-resolves dependencies. Per-cycle overhead: {'; '.join(cycle_details)}. "
+                f"Total overhead: {total_overhead:.0f}s, but only {critical_overhead:.0f}s "
+                f"is on the critical path (resumes overlapping with test execution are free)."
+            ),
+            evidence=(
+                f"Concord logs show {len(orchestration.resume_overheads)} resume cycles. "
+                f"Only cycles after test completion (epoch {test_end_epoch_s:.0f}) extend wall-clock."
+            ),
+            estimated_savings_s=f"{critical_overhead:.0f}s",
+            difficulty="Low",
+            priority="P2",
+        ))
+
+    # Finding 7: Sequential child checking (0-9s)
     if len(orchestration.children) > 1 and orchestration.resume_count > 1:
         non_critical = [r for r in orchestration.resume_overheads if not r.on_critical_path]
         findings.append(Finding(
-            rank=3,
+            rank=7,
             title="Parallelize Concord Child Checking",
             description=(
                 f"The Concord parent checks {len(orchestration.children)} children in "
@@ -118,89 +198,7 @@ def correlate(
             priority="P2",
         ))
 
-    # Finding 4: K8s pod startup latency
-    if dispatcher.job_id:
-        compute_s = dispatcher.total_duration_s
-        findings.append(Finding(
-            rank=4,
-            title="Reduce K8s Pod Startup Latency",
-            description=(
-                f"Dispatcher job {dispatcher.job_id} pod took significant time from scheduling "
-                f"to first log, but only {compute_s:.0f}s of actual compute. "
-                f"This overhead suggests opportunity in pod pre-warming or smaller container images."
-            ),
-            evidence=f"Job {dispatcher.job_id} pod: {compute_s:.0f}s compute time.",
-            estimated_savings_s="60-120s",
-            difficulty="Medium",
-            priority="P1",
-        ))
-
-    # Finding 5: Kono sequential ForkJoinPools
-    if len(kono.pools) >= 2:
-        sorted_pools = sorted(kono.pools.values(), key=lambda p: p.start_ms)
-        later_pool = sorted_pools[-1]
-        if later_pool.start_ms > sorted_pools[0].stop_ms:
-            waste = later_pool.wall_clock_s
-            findings.append(Finding(
-                rank=5,
-                title="Run Kono ForkJoinPools Concurrently",
-                description=(
-                    f"{sorted_pools[0].name} ({sorted_pools[0].count} tests, "
-                    f"{sorted_pools[0].wall_clock_s:.1f}s) and "
-                    f"{later_pool.name} ({later_pool.count} tests, {later_pool.wall_clock_s:.1f}s) "
-                    f"execute sequentially. Running them concurrently would save ~{waste:.0f}s."
-                ),
-                evidence=(
-                    f"{later_pool.name} starts after {sorted_pools[0].name} ends. "
-                    f"{later_pool.name} parallelism: {later_pool.parallelism:.2f}x."
-                ),
-                estimated_savings_s=f"~{waste:.0f}s",
-                difficulty="Low",
-                priority="P2",
-            ))
-
-    # Finding 6: Substantiate setup phase serialization
-    setup = substantiate.setup_phase_analysis(threshold_s=340.0)
-    if setup:
-        findings.append(Finding(
-            rank=6,
-            title="Parallelize Substantiate Setup Chain",
-            description=(
-                f"The first {setup['setup_duration_s']:.0f}s of Substantiate execution is a "
-                f"mostly-sequential setup chain. Only {setup['setup_tests']} tests run, "
-                f"while {setup['idle_workers']} workers sit idle."
-            ),
-            evidence=(
-                f"Only {setup['setup_tests']} tests in first {setup['setup_duration_s']:.0f}s. "
-                f"Workers {', '.join(setup['idle_worker_names'][:3])}... idle for 300+ seconds."
-            ),
-            estimated_savings_s="100-170s",
-            difficulty="Medium",
-            priority="P2",
-        ))
-
-    # Finding 7: Substantiate polling interval
-    polling = substantiate.polling_analysis()
-    if polling and polling["polling_pct"] > 50:
-        findings.append(Finding(
-            rank=7,
-            title="Reduce Substantiate Polling Interval",
-            description=(
-                f"Substantiate aggregate runtime is dominated by long-running compute waits; "
-                f"an inferred {polling['polling_pct']:.1f}% of aggregate time is in long-running (likely polling) tests. "
-                f"Precise polling-vs-non-polling attribution is not fully observable from fixtures alone. "
-                f"Reducing poll interval from 20s to 5s would cut average overshoot."
-            ),
-            evidence=(
-                f"{polling['polling_pct']:.1f}% of {polling['aggregate_min']:.1f} min aggregate time "
-                f"in long-running tests (inferred heuristic: tests >16s classified as polling-dominated)."
-            ),
-            estimated_savings_s="30-60s",
-            difficulty="Low",
-            priority="P2",
-        ))
-
-    # Finding 8: Application has massive headroom
+    # Finding 8: Application has massive headroom (informational)
     if metrics_result.cpu and metrics_result.hikaricp_pending:
         findings.append(Finding(
             rank=8,

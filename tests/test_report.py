@@ -125,14 +125,14 @@ class TestReportDeterminism:
             python -c "
             from pipeline_cycle_time.cli import analyze_fixtures
             r = analyze_fixtures('fixtures/2026-02-24-aep')
-            open('tests/snapshot_report.md','w').write(r)
+            open('tests/ANALYSIS-REPORT.md','w').write(r)
             "
         """
-        snapshot_path = Path(__file__).parent / "snapshot_report.md"
+        snapshot_path = Path(__file__).parent / "ANALYSIS-REPORT.md"
         assert snapshot_path.exists(), (
             "Snapshot not found. Generate it with: "
             "python -c \"from pipeline_cycle_time.cli import analyze_fixtures; "
-            "open('tests/snapshot_report.md','w').write(analyze_fixtures('fixtures/2026-02-24-aep'))\""
+            "open('tests/ANALYSIS-REPORT.md','w').write(analyze_fixtures('fixtures/2026-02-24-aep'))\""
         )
         snapshot = snapshot_path.read_text()
         if generated_report != snapshot:
