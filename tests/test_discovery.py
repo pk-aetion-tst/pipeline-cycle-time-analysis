@@ -2,7 +2,9 @@
 import pytest
 from pathlib import Path
 
-from pipeline_cycle_time.fetchers.discovery import discover, PipelineMetadata
+from pipeline_cycle_time.fetchers.discovery import (
+    discover, discover_report_locations, PipelineMetadata, ReportLocation,
+)
 
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
@@ -45,6 +47,11 @@ class TestDiscoveryFromFixture:
     def test_epoch_s_properties(self, meta):
         assert meta.start_epoch_s == meta.start_epoch_ns / 1e9
         assert meta.end_epoch_s == meta.end_epoch_ns / 1e9
+
+    def test_children_extracted(self, meta):
+        assert len(meta.children) == 2
+        assert "806f92a1-ac9b-4a18-8bc3-7334cfc53878" in meta.children
+        assert "c6cbe79e-0a06-4b8d-ac8c-3722e608fc2c" in meta.children
 
 
 class TestDiscoveryFromMarch:
@@ -90,3 +97,60 @@ class TestDiscoverySynthetic:
         meta = discover(log)
         duration_s = (meta.end_epoch_ns - meta.start_epoch_ns) / 1e9
         assert duration_s == pytest.approx(600.0, abs=1.0)
+
+    def test_children_extraction(self):
+        log = (
+            '2026-01-01T10:00:00.000+0000 [INFO ] Started a process: '
+            '<concord:instanceId>abc-111</concord:instanceId>\n'
+            '2026-01-01T10:00:01.000+0000 [INFO ] Started a process: '
+            '<concord:instanceId>def-222</concord:instanceId>\n'
+        )
+        meta = discover(log)
+        assert meta.children == ["abc-111", "def-222"]
+
+
+class TestDiscoverReportLocations:
+    """Test report location discovery from child process logs."""
+
+    def test_kono_report_s3_cp(self):
+        log = (
+            "Uploading report to s3://my-bucket/my-folder/kono-report/data/timeline.json\n"
+            "upload complete\n"
+        )
+        locs = discover_report_locations("child-1", log)
+        assert len(locs) == 1
+        assert locs[0].report_name == "kono-report"
+        assert locs[0].s3_uri == "s3://my-bucket/my-folder/kono-report/data/"
+        assert locs[0].child_id == "child-1"
+
+    def test_substantiate_report(self):
+        log = "aws s3 cp ... s3://bucket/folder/substantiate-report/data/behaviors.json\n"
+        locs = discover_report_locations("child-2", log)
+        assert len(locs) == 1
+        assert locs[0].report_name == "substantiate-report"
+        assert locs[0].s3_uri == "s3://bucket/folder/substantiate-report/data/"
+
+    def test_both_reports_in_same_log(self):
+        log = (
+            "s3://b/f/kono-report/data/timeline.json uploaded\n"
+            "s3://b/f/substantiate-report/data/timeline.json uploaded\n"
+        )
+        locs = discover_report_locations("child-1", log)
+        names = {loc.report_name for loc in locs}
+        assert names == {"kono-report", "substantiate-report"}
+
+    def test_deduplicates_same_report(self):
+        log = (
+            "s3://b/f/kono-report/data/timeline.json\n"
+            "s3://b/f/kono-report/data/behaviors.json\n"
+        )
+        locs = discover_report_locations("child-1", log)
+        assert len(locs) == 1
+
+    def test_no_reports(self):
+        log = "some random log line with no s3 URIs\n"
+        locs = discover_report_locations("child-1", log)
+        assert locs == []
+
+    def test_empty_log(self):
+        assert discover_report_locations("child-1", "") == []

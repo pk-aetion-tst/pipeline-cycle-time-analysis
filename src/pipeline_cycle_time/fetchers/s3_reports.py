@@ -5,9 +5,43 @@ import subprocess
 from pathlib import Path
 
 
-# Reports are stored at s3://reports.dev.aetion.com/{s3_folder}/
-# with subdirectories kono-report/ and substantiate-report/
+# Fallback bucket when report locations are not discovered from child logs.
 REPORTS_BUCKET = "reports.dev.aetion.com"
+
+
+def fetch_report(
+    s3_uri: str,
+    report_name: str,
+    aws_profile: str,
+    output_dir: str,
+) -> str:
+    """Download a single report from a discovered S3 URI.
+
+    Args:
+        s3_uri: Full s3:// URI to the report data directory.
+        report_name: Local directory name (e.g. "kono-report").
+        aws_profile: AWS CLI profile name.
+        output_dir: Local parent directory to save into.
+
+    Returns:
+        Local path to the downloaded report directory.
+    """
+    local_dir = Path(output_dir) / report_name / "data"
+    local_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure trailing slash for recursive copy
+    src = s3_uri.rstrip("/") + "/"
+
+    proc = subprocess.run(
+        ["aws", "s3", "cp", "--recursive", "--profile", aws_profile,
+         src, str(local_dir)],
+        capture_output=True, text=True, timeout=300,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"Failed to download {report_name} from {src}: {proc.stderr}"
+        )
+    return str(Path(output_dir) / report_name)
 
 
 def fetch_reports(
@@ -16,40 +50,15 @@ def fetch_reports(
     output_dir: str,
     reports_bucket: str = REPORTS_BUCKET,
 ) -> dict[str, str]:
-    """Fetch kono-report and substantiate-report from S3.
+    """Fetch kono-report and substantiate-report using a fallback bucket/folder.
 
-    Downloads the Allure report data directories needed for analysis.
-
-    Args:
-        s3_folder: S3 folder prefix (e.g. "aep-dev").
-        aws_profile: AWS CLI profile name.
-        output_dir: Local directory to save reports into.
-        reports_bucket: Override the S3 bucket name.
-
-    Returns:
-        Dict mapping report name to local path, e.g.
-        {"kono-report": "/tmp/.../kono-report", "substantiate-report": "/tmp/.../substantiate-report"}
+    This is the legacy path used when report locations are not discovered
+    from child process logs.
     """
-    out = Path(output_dir)
     result = {}
-
     for report_name in ("kono-report", "substantiate-report"):
-        s3_prefix = f"s3://{reports_bucket}/{s3_folder}/{report_name}/data/"
-        local_dir = out / report_name / "data"
-        local_dir.mkdir(parents=True, exist_ok=True)
-
-        proc = subprocess.run(
-            [
-                "aws", "s3", "cp", "--recursive",
-                "--profile", aws_profile,
-                s3_prefix, str(local_dir),
-            ],
-            capture_output=True, text=True, timeout=300,
+        s3_uri = f"s3://{reports_bucket}/{s3_folder}/{report_name}/data/"
+        result[report_name] = fetch_report(
+            s3_uri, report_name, aws_profile, output_dir,
         )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"Failed to download {report_name} from {s3_prefix}: {proc.stderr}"
-            )
-        result[report_name] = str(out / report_name)
-
     return result

@@ -92,18 +92,48 @@ def analyze_live(
     print(f"  namespace={meta.namespace}  webapp={meta.webapp_pod}  "
           f"dispatcher={meta.dispatcher_pod}", file=sys.stderr)
 
-    # 3. Fetch S3 reports
-    s3_folder = meta.s3_folder
-    if s3_folder:
-        print(f"Fetching S3 reports from {s3_folder}...", file=sys.stderr)
+    # 3. Fetch child process logs and discover S3 report locations
+    report_locations = []
+    for child_id in meta.children:
+        print(f"Fetching child process log {child_id[:8]}...", file=sys.stderr)
         try:
-            s3_reports.fetch_reports(s3_folder, aws_profile, str(out))
+            child_log = concord.fetch_log(child_id)
+            (log_dir / f"child-{child_id[:8]}.txt").write_text(child_log)
+            report_locations.extend(
+                discovery.discover_report_locations(child_id, child_log)
+            )
+        except Exception as e:
+            print(f"  Warning: failed to fetch child {child_id[:8]}: {e}",
+                  file=sys.stderr)
+
+    if report_locations:
+        print(f"Discovered {len(report_locations)} report(s) from child logs:",
+              file=sys.stderr)
+        for rl in report_locations:
+            print(f"  {rl.report_name} → {rl.s3_uri}", file=sys.stderr)
+
+    # 4. Fetch S3 reports (from discovered locations or fallback)
+    if report_locations:
+        for rl in report_locations:
+            try:
+                s3_reports.fetch_report(
+                    rl.s3_uri, rl.report_name, aws_profile, str(out),
+                )
+            except RuntimeError as e:
+                print(f"Warning: {rl.report_name} fetch failed: {e}",
+                      file=sys.stderr)
+    elif meta.s3_folder:
+        print(f"No reports found in child logs, falling back to "
+              f"s3://{s3_reports.REPORTS_BUCKET}/{meta.s3_folder}/...",
+              file=sys.stderr)
+        try:
+            s3_reports.fetch_reports(meta.s3_folder, aws_profile, str(out))
         except RuntimeError as e:
             print(f"Warning: S3 report fetch failed: {e}", file=sys.stderr)
     else:
-        print("Warning: could not determine S3 folder from log", file=sys.stderr)
+        print("Warning: could not determine S3 report locations", file=sys.stderr)
 
-    # 4. Fetch Loki logs (webapp + dispatcher)
+    # 5. Fetch Loki logs (webapp + dispatcher)
     if meta.webapp_pod:
         print(f"Fetching webapp logs...", file=sys.stderr)
         try:
@@ -153,7 +183,7 @@ def analyze_live(
             '{"status":"success","data":{"resultType":"streams","result":[]}}'
         )
 
-    # 5. Fetch Prometheus metrics
+    # 6. Fetch Prometheus metrics
     metrics_dir = out / "metrics"
     metrics_dir.mkdir(parents=True, exist_ok=True)
 
@@ -188,7 +218,7 @@ def analyze_live(
             except Exception as e:
                 print(f"  Warning: {desc} fetch failed: {e}", file=sys.stderr)
 
-    # 6. Run analysis on fetched data
+    # 7. Run analysis on fetched data
     print("Running analysis...", file=sys.stderr)
     return analyze_fixtures(str(out), output)
 

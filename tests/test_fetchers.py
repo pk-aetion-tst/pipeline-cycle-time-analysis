@@ -176,25 +176,32 @@ class TestPrometheusFetcher:
 class TestS3Fetcher:
 
     @mock.patch("subprocess.run")
-    def test_fetch_reports_success(self, mock_run, tmp_path):
+    def test_fetch_report_single(self, mock_run, tmp_path):
+        mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+        result = s3_reports.fetch_report(
+            "s3://bucket/folder/kono-report/data/", "kono-report", "dev", str(tmp_path),
+        )
+        assert "kono-report" in result
+        cmd = mock_run.call_args[0][0]
+        assert cmd[0] == "aws"
+        assert "s3" in cmd
+        assert "--profile" in cmd
+
+    @mock.patch("subprocess.run")
+    def test_fetch_report_failure(self, mock_run, tmp_path):
+        mock_run.return_value = mock.Mock(returncode=1, stdout="", stderr="Access Denied")
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            s3_reports.fetch_report(
+                "s3://bucket/folder/kono-report/data/", "kono-report", "dev", str(tmp_path),
+            )
+
+    @mock.patch("subprocess.run")
+    def test_fetch_reports_fallback(self, mock_run, tmp_path):
         mock_run.return_value = mock.Mock(returncode=0, stdout="", stderr="")
         result = s3_reports.fetch_reports("aep-dev", "dev", str(tmp_path))
         assert "kono-report" in result
         assert "substantiate-report" in result
         assert mock_run.call_count == 2
-
-        # Verify aws s3 cp command structure
-        for call in mock_run.call_args_list:
-            cmd = call[0][0]
-            assert cmd[0] == "aws"
-            assert "s3" in cmd
-            assert "--profile" in cmd
-
-    @mock.patch("subprocess.run")
-    def test_fetch_reports_failure(self, mock_run, tmp_path):
-        mock_run.return_value = mock.Mock(returncode=1, stdout="", stderr="Access Denied")
-        with pytest.raises(RuntimeError, match="Access Denied"):
-            s3_reports.fetch_reports("aep-dev", "dev", str(tmp_path))
 
 
 # ---------------------------------------------------------------------------
@@ -204,38 +211,44 @@ class TestS3Fetcher:
 class TestLiveModeIntegration:
     """Test that analyze_live orchestrates fetchers correctly."""
 
-    @mock.patch("pipeline_cycle_time.fetchers.s3_reports.fetch_reports")
+    @mock.patch("pipeline_cycle_time.fetchers.s3_reports.fetch_report")
     @mock.patch("pipeline_cycle_time.fetchers.prometheus.fetch_metric")
     @mock.patch("pipeline_cycle_time.fetchers.loki.fetch_logs")
     @mock.patch("pipeline_cycle_time.fetchers.concord.fetch_log")
-    def test_live_mode_saves_raw_data(
-        self, mock_concord, mock_loki, mock_prom, mock_s3, tmp_path
+    def test_live_mode_discovers_reports_from_children(
+        self, mock_concord, mock_loki, mock_prom, mock_s3_report, tmp_path
     ):
-        # Use the real fixture log as the Concord response
         fixture_dir = Path(__file__).parent.parent / "fixtures" / "2026-02-24-aep"
-        mock_concord.return_value = (fixture_dir / "logs" / "concord-log.txt").read_text()
+        parent_log = (fixture_dir / "logs" / "concord-log.txt").read_text()
 
-        # Loki returns minimal valid response
+        # Child logs contain S3 report upload paths
+        child_log_kono = (
+            "Running kono tests...\n"
+            "Uploading report to s3://my-bucket/aep-dev/kono-report/data/timeline.json\n"
+        )
+        child_log_sub = (
+            "Running substantiate tests...\n"
+            "aws s3 cp ... s3://my-bucket/aep-dev/substantiate-report/data/timeline.json\n"
+        )
+
+        # fetch_log returns parent log first, then child logs
+        mock_concord.side_effect = [parent_log, child_log_kono, child_log_sub]
+
         loki_resp = {"status": "success", "data": {"resultType": "streams", "result": []}}
         mock_loki.return_value = loki_resp
 
-        # Prometheus returns minimal valid response
         prom_resp = {"status": "success", "data": {"resultType": "matrix", "result": []}}
         mock_prom.return_value = prom_resp
 
-        # S3 copies the fixture data
-        def fake_s3(s3_folder, profile, output_dir, **kwargs):
+        # S3 fetch_report copies fixture data for each report
+        def fake_s3_report(s3_uri, report_name, profile, output_dir):
             import shutil
-            for name in ("kono-report", "substantiate-report"):
-                src = fixture_dir / name / "data"
-                dst = Path(output_dir) / name / "data"
-                if src.exists():
-                    shutil.copytree(src, dst, dirs_exist_ok=True)
-            return {
-                "kono-report": str(Path(output_dir) / "kono-report"),
-                "substantiate-report": str(Path(output_dir) / "substantiate-report"),
-            }
-        mock_s3.side_effect = fake_s3
+            src = fixture_dir / report_name / "data"
+            dst = Path(output_dir) / report_name / "data"
+            if src.exists():
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            return str(Path(output_dir) / report_name)
+        mock_s3_report.side_effect = fake_s3_report
 
         from pipeline_cycle_time.cli import analyze_live
         out_dir = tmp_path / "output"
@@ -251,11 +264,68 @@ class TestLiveModeIntegration:
         assert (out_dir / "logs" / "webapp-logs.json").exists()
         assert (out_dir / "logs" / "dispatcher-logs.json").exists()
 
-        # Verify report was generated
-        assert "Pipeline" in report or "pipeline" in report.lower()
+        # Verify child logs were saved
+        child_logs = list((out_dir / "logs").glob("child-*.txt"))
+        assert len(child_logs) == 2
 
-        # Verify fetchers were called with correct auth
-        mock_concord.assert_called_once()
-        assert mock_loki.call_count >= 1
+        # Verify report was generated
+        assert "pipeline" in report.lower()
+
+        # Verify fetch_log called 3 times: parent + 2 children
+        assert mock_concord.call_count == 3
+
+        # Verify S3 reports fetched via discovered URIs (not fallback)
+        assert mock_s3_report.call_count == 2
+        s3_calls = [call[0] for call in mock_s3_report.call_args_list]
+        s3_uris = {call[0] for call in s3_calls}
+        assert "s3://my-bucket/aep-dev/kono-report/data/" in s3_uris
+        assert "s3://my-bucket/aep-dev/substantiate-report/data/" in s3_uris
+
+        # Verify Loki called with correct auth
         for call in mock_loki.call_args_list:
             assert call.kwargs.get("grafana_token") == "test-token"
+
+    @mock.patch("pipeline_cycle_time.fetchers.s3_reports.fetch_reports")
+    @mock.patch("pipeline_cycle_time.fetchers.prometheus.fetch_metric")
+    @mock.patch("pipeline_cycle_time.fetchers.loki.fetch_logs")
+    @mock.patch("pipeline_cycle_time.fetchers.concord.fetch_log")
+    def test_live_mode_falls_back_when_no_reports_in_children(
+        self, mock_concord, mock_loki, mock_prom, mock_s3_fallback, tmp_path
+    ):
+        fixture_dir = Path(__file__).parent.parent / "fixtures" / "2026-02-24-aep"
+        parent_log = (fixture_dir / "logs" / "concord-log.txt").read_text()
+
+        # Child logs have no S3 report URIs
+        child_log = "Running tests...\nDone.\n"
+        mock_concord.side_effect = [parent_log, child_log, child_log]
+
+        loki_resp = {"status": "success", "data": {"resultType": "streams", "result": []}}
+        mock_loki.return_value = loki_resp
+        prom_resp = {"status": "success", "data": {"resultType": "matrix", "result": []}}
+        mock_prom.return_value = prom_resp
+
+        def fake_s3_fallback(s3_folder, profile, output_dir, **kwargs):
+            import shutil
+            for name in ("kono-report", "substantiate-report"):
+                src = fixture_dir / name / "data"
+                dst = Path(output_dir) / name / "data"
+                if src.exists():
+                    shutil.copytree(src, dst, dirs_exist_ok=True)
+            return {
+                "kono-report": str(Path(output_dir) / "kono-report"),
+                "substantiate-report": str(Path(output_dir) / "substantiate-report"),
+            }
+        mock_s3_fallback.side_effect = fake_s3_fallback
+
+        from pipeline_cycle_time.cli import analyze_live
+        out_dir = tmp_path / "output"
+        report = analyze_live(
+            process_id="test-uuid",
+            output_dir=str(out_dir),
+            grafana_token="test-token",
+            aws_profile="dev",
+        )
+
+        # Fallback fetch_reports should have been called
+        mock_s3_fallback.assert_called_once()
+        assert "pipeline" in report.lower()
