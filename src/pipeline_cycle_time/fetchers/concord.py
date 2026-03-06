@@ -9,17 +9,23 @@ CONCORD_BASE_URL = "https://concord.dev.aetion.com"
 
 
 def _get_keychain_token() -> str:
-    """Retrieve the Concord token from the macOS keychain."""
-    result = subprocess.run(
-        ["security", "find-generic-password", "-s", "concord-token", "-w"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError(
-            "Could not retrieve Concord token from keychain. "
-            "Store it with: security add-generic-password -s concord-token -a concord -w <token>"
+    """Retrieve the Concord token from the macOS keychain.
+
+    Tries the concord plugin's token first (concord-prod-access-token),
+    then falls back to the legacy concord-token entry.
+    """
+    for service in ("concord-prod-access-token", "concord-token"):
+        result = subprocess.run(
+            ["security", "find-generic-password", "-s", service, "-w"],
+            capture_output=True, text=True,
         )
-    return result.stdout.strip()
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    raise RuntimeError(
+        "Could not retrieve Concord token from keychain. "
+        "Run concord-login.sh or store it with: "
+        "security add-generic-password -s concord-token -a concord -w <token>"
+    )
 
 
 def fetch_log(
@@ -39,7 +45,6 @@ def fetch_log(
     url = f"{base_url}/api/v1/process/{process_id}/log"
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}",
-        "Accept": "text/plain",
     })
     with urllib.request.urlopen(req, timeout=60) as resp:
         return resp.read().decode("utf-8")

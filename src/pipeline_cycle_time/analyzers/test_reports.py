@@ -203,6 +203,8 @@ def _extract_pool(worker_name: str) -> str:
 
 def analyze_timeline(timeline_path: str, suite_name: str) -> TestSuiteResult:
     """Analyze an Allure timeline.json file."""
+    if not Path(timeline_path).exists():
+        return TestSuiteResult(name=suite_name)
     with open(timeline_path) as f:
         data = json.load(f)
 

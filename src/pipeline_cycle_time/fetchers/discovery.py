@@ -136,39 +136,59 @@ def discover(log_text: str) -> PipelineMetadata:
     return meta
 
 
+# Map S3 path keywords to canonical report names used by analyzers
+_REPORT_KEYWORDS = {
+    "kono-report": "kono-report",
+    "substantiate-report": "substantiate-report",
+    "kono-integration": "kono-report",
+    "substantiate-integration": "substantiate-report",
+}
+
+_REPORT_PATTERN = "|".join(re.escape(k) for k in _REPORT_KEYWORDS)
+
+
 def discover_report_locations(
     child_id: str,
     child_log: str,
 ) -> list[ReportLocation]:
     """Parse a child process log to find S3 report upload locations.
 
-    Child test-runner processes log lines like:
-        s3 cp ... s3://bucket/folder/kono-report/data/...
-        Uploading allure report to s3://bucket/folder/kono-report/
-        report uploaded to s3://bucket/folder/substantiate-report/data/
-
-    We look for any s3:// URI containing 'kono-report' or 'substantiate-report'.
+    Matches both legacy paths (kono-report/, substantiate-report/) and
+    current paths (kono-integration/report-<date>/, substantiate-integration/...).
+    Prefers URIs containing /data/ (the actual report data directory).
     """
     results = []
-    seen = set()
+    seen: dict[str, str] = {}  # canonical_name -> best data_uri
 
-    s3_uri_re = re.compile(r'(s3://[^\s"\']+(?:kono-report|substantiate-report)[^\s"\']*)')
+    s3_uri_re = re.compile(
+        r'(s3://[^\s"\']+(?:' + _REPORT_PATTERN + r')[^\s"\']*)'
+    )
 
     for line in child_log.splitlines():
         for m in s3_uri_re.finditer(line):
             uri = m.group(1).rstrip("/")
-            # Normalize to the report root (strip /data/... suffix)
-            for report_name in ("kono-report", "substantiate-report"):
-                if report_name in uri:
-                    # Truncate at report_name to get the base, then add /data/
-                    idx = uri.index(report_name)
-                    base_uri = uri[:idx + len(report_name)]
-                    data_uri = base_uri + "/data/"
-                    if report_name not in seen:
-                        seen.add(report_name)
-                        results.append(ReportLocation(
-                            report_name=report_name,
-                            s3_uri=data_uri,
-                            child_id=child_id,
-                        ))
+            for keyword, canonical in _REPORT_KEYWORDS.items():
+                if keyword not in uri:
+                    continue
+                idx = uri.index(keyword)
+                after_keyword = uri[idx + len(keyword):]
+                # For timestamped paths like kono-integration/report-<date>/data/...
+                report_dir_match = re.match(r'/report-[^/]+', after_keyword)
+                if report_dir_match:
+                    base_uri = uri[:idx + len(keyword) + report_dir_match.end()]
+                else:
+                    base_uri = uri[:idx + len(keyword)]
+                data_uri = base_uri + "/data/"
+                # Prefer URIs that reference /data/ (actual report files)
+                prev = seen.get(canonical)
+                if prev is None or "/data/" in uri:
+                    seen[canonical] = data_uri
+                break
+
+    for canonical, data_uri in seen.items():
+        results.append(ReportLocation(
+            report_name=canonical,
+            s3_uri=data_uri,
+            child_id=child_id,
+        ))
     return results

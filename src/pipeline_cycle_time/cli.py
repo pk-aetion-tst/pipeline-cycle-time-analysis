@@ -91,20 +91,38 @@ def analyze_live(
         print("Error: could not extract namespace from Concord log", file=sys.stderr)
         sys.exit(1)
 
-    grafana_base_url = meta.grafana_base_url or loki.GRAFANA_BASE_URL
+    # Use discovered URL unless it contains redacted content (e.g. ******)
+    discovered_url = meta.grafana_base_url
+    if discovered_url and "***" not in discovered_url:
+        grafana_base_url = discovered_url
+    else:
+        grafana_base_url = loki.GRAFANA_BASE_URL
     comp_summary = ", ".join(f"{c.label}={c.pod}" for c in meta.deployed_components)
     print(f"  namespace={meta.namespace}  components: {comp_summary or 'none found'}",
           file=sys.stderr)
 
     # 3. Fetch child process logs and discover S3 report locations
+    # Concord redacts org name in child logs (e.g. aetion → ******).
+    # Reconstruct it from the unredacted s3_bucket in the parent config.
+    redaction_domain = ""
+    if meta.s3_bucket and "." in meta.s3_bucket:
+        # e.g. "aep.dev.aetion.com" → "aetion"
+        parts = meta.s3_bucket.split(".")
+        if len(parts) >= 3:
+            redaction_domain = parts[-2]  # "aetion"
+
     report_locations = []
     for child_id in meta.children:
         print(f"Fetching child process log {child_id[:8]}...", file=sys.stderr)
         try:
             child_log = concord.fetch_log(child_id, base_url=concord_base)
             (log_dir / f"child-{child_id[:8]}.txt").write_text(child_log)
+            # Unredact org name in S3 URIs for report discovery
+            parse_log = child_log
+            if redaction_domain:
+                parse_log = parse_log.replace("******", redaction_domain)
             report_locations.extend(
-                discovery.discover_report_locations(child_id, child_log)
+                discovery.discover_report_locations(child_id, parse_log)
             )
         except Exception as e:
             print(f"  Warning: failed to fetch child {child_id[:8]}: {e}",
