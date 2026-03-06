@@ -3,7 +3,8 @@ import pytest
 from pathlib import Path
 
 from pipeline_cycle_time.fetchers.discovery import (
-    discover, discover_report_locations, PipelineMetadata, ReportLocation,
+    discover, discover_report_locations, get_child_end_epoch_s,
+    PipelineMetadata, ReportLocation,
 )
 
 
@@ -154,3 +155,98 @@ class TestDiscoverReportLocations:
 
     def test_empty_log(self):
         assert discover_report_locations("child-1", "") == []
+
+
+class TestGetChildEndEpochS:
+    """Test child process end time extraction."""
+
+    def test_extracts_last_timestamp(self):
+        log = (
+            "2026-03-06T13:00:00.000+0000 [INFO ] Start\n"
+            "2026-03-06T13:48:29.000+0000 [INFO ] Done\n"
+        )
+        end_s = get_child_end_epoch_s(log)
+        assert end_s == pytest.approx(1772804909.0, abs=1.0)
+
+    def test_empty_log_returns_zero(self):
+        assert get_child_end_epoch_s("") == 0.0
+
+    def test_no_timestamps_returns_zero(self):
+        assert get_child_end_epoch_s("no timestamps here\n") == 0.0
+
+    def test_later_than_test_end(self):
+        """Child end time should be later than test assertions finish.
+
+        In a real pipeline, GHA job teardown adds ~17s between test
+        completion and the child process finishing.
+        """
+        # Test finishes at 13:48:12, child finishes at 13:48:29
+        child_log = (
+            "2026-03-06T13:40:00.000+0000 [INFO ] Tests starting\n"
+            "2026-03-06T13:48:29.000+0000 [INFO ] Job cleanup complete\n"
+        )
+        test_end_epoch_s = 1772804892.0  # 13:48:12
+        child_end = get_child_end_epoch_s(child_log)
+        assert child_end > test_end_epoch_s
+        assert child_end - test_end_epoch_s == pytest.approx(17.0, abs=1.0)
+
+
+class TestPollingGapWithChildEndTime:
+    """Verify correlator uses child end time for more accurate polling gap."""
+
+    def test_polling_gap_shrinks_with_child_end_time(self):
+        from pipeline_cycle_time.analyzers.correlator import correlate
+        from pipeline_cycle_time.analyzers.orchestration import (
+            OrchestrationResult, ResumeOverhead,
+        )
+        from pipeline_cycle_time.analyzers.test_reports import TestSuiteResult, TestInfo
+        from pipeline_cycle_time.analyzers.app_logs import AppLogsResult, DispatcherTimeline
+        from pipeline_cycle_time.analyzers.metrics import MetricsResult
+        from datetime import datetime, timezone
+
+        # Parent resumes at 13:49:03
+        resume_time = datetime(2026, 3, 6, 13, 49, 3, tzinfo=timezone.utc)
+        orch = OrchestrationResult(
+            resume_overheads=[ResumeOverhead(
+                resume_time=resume_time,
+                repo_export_s=3.0, dep_resolution_s=5.0,
+                on_critical_path=True,
+            )],
+            total_start=datetime(2026, 3, 6, 13, 30, 0, tzinfo=timezone.utc),
+            total_end=datetime(2026, 3, 6, 13, 50, 0, tzinfo=timezone.utc),
+        )
+        # Tests ended at 13:48:12 (epoch 1772804892)
+        test_end_ms = 1772804892 * 1000
+        fake_test = TestInfo(
+            name="t", uid="1", status="passed",
+            start=test_end_ms - 60000, stop=test_end_ms,
+            duration=60000, worker="w1",
+        )
+        kono = TestSuiteResult(name="Kono", tests=[fake_test])
+        sub = TestSuiteResult(name="Sub", tests=[fake_test])
+
+        app = AppLogsResult()
+        disp = DispatcherTimeline()
+        met = MetricsResult()
+
+        # Without child end time: gap = 13:49:03 - 13:48:12 = 51s
+        result_no_child = correlate(orch, kono, sub, app, disp, met)
+        polling_findings = [f for f in result_no_child.findings
+                           if "Suspend Polling" in f.title]
+        assert len(polling_findings) == 1
+        assert "51s" in polling_findings[0].evidence
+
+        # Reset on_critical_path (correlate mutates it)
+        orch.resume_overheads[0].on_critical_path = True
+
+        # With child end time (13:48:29): gap = 13:49:03 - 13:48:29 = 34s
+        child_end_epoch_s = 1772804909.0  # 13:48:29
+        result_with_child = correlate(
+            orch, kono, sub, app, disp, met,
+            children_end_epoch_s=child_end_epoch_s,
+        )
+        polling_findings2 = [f for f in result_with_child.findings
+                            if "Suspend Polling" in f.title]
+        assert len(polling_findings2) == 1
+        assert "34s" in polling_findings2[0].evidence
+        assert "Child process ended" in polling_findings2[0].evidence

@@ -33,11 +33,17 @@ def correlate(
     app_logs: AppLogsResult,
     dispatcher: DispatcherTimeline,
     metrics_result: MetricsResult,
+    children_end_epoch_s: float = 0.0,
 ) -> CorrelationResult:
     findings: list[Finding] = []
 
     # Determine end of all test suites for critical-path analysis
     test_end_epoch_s = max(kono.end_epoch_s, substantiate.end_epoch_s)
+
+    # For polling delay calculation, use the child process end time if
+    # available (accounts for GHA job teardown, report upload, webhook
+    # delivery after tests finish).  Fall back to test end time.
+    child_done_epoch_s = children_end_epoch_s if children_end_epoch_s > 0 else test_end_epoch_s
 
     # Mark which resume cycles are on the critical path
     orchestration.mark_critical_path(test_end_epoch_s)
@@ -103,23 +109,28 @@ def correlate(
                 priority="P1",
             ))
 
-    # Finding 4: Concord polling delay (51-56s)
-    if orchestration.resume_overheads and test_end_epoch_s > 0:
+    # Finding 4: Concord polling delay
+    if orchestration.resume_overheads and child_done_epoch_s > 0:
         critical_resumes = [r for r in orchestration.resume_overheads if r.on_critical_path]
         if critical_resumes:
             last_resume = critical_resumes[0]
-            polling_gap_s = last_resume.resume_time.timestamp() - test_end_epoch_s
+            polling_gap_s = last_resume.resume_time.timestamp() - child_done_epoch_s
             if polling_gap_s > 5:
+                # Note the source of the baseline time for transparency
+                if children_end_epoch_s > 0:
+                    baseline_label = "child process ended"
+                else:
+                    baseline_label = "tests ended"
                 findings.append(Finding(
                     rank=4,
                     title="Reduce Concord Suspend Polling Delay",
                     description=(
-                        f"After all tests completed, the Concord parent remained suspended "
+                        f"After all children completed, the Concord parent remained suspended "
                         f"for {polling_gap_s:.0f}s before resuming. This gap is Concord's "
                         f"internal polling interval and is pure wall-clock waste."
                     ),
                     evidence=(
-                        f"Tests ended at {test_end_epoch_s:.0f} epoch, "
+                        f"{baseline_label.capitalize()} at {child_done_epoch_s:.0f} epoch, "
                         f"parent resumed at {last_resume.resume_time.timestamp():.0f} epoch "
                         f"({polling_gap_s:.0f}s gap)."
                     ),

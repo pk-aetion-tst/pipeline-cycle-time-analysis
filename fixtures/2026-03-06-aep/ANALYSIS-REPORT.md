@@ -18,7 +18,7 @@ Across 1,499 total tests (1,240 Kono + 259 Substantiate): **1,495 passed, 0 fail
 
 3. **Run Kono ForkJoinPools Concurrently.** Pool-1 (185 tests, 282.0s) and Pool-2 (1055 tests, 43.8s) execute sequentially. Running them concurrently would save ~44s.
 
-4. **Reduce Concord Suspend Polling Delay.** After all tests completed, the Concord parent remained suspended for 51s before resuming. This gap is Concord's internal polling interval and is pure wall-clock waste.
+4. **Reduce Concord Suspend Polling Delay.** After all children completed, the Concord parent remained suspended for 51s before resuming. This gap is Concord's internal polling interval and is pure wall-clock waste.
 
 5. **Reduce Substantiate Polling Interval.** Substantiate aggregate runtime is dominated by long-running compute waits; an inferred 76.8% of aggregate time is in long-running (likely polling) tests. Precise polling-vs-non-polling attribution is not fully observable from fixtures alone. Reducing poll interval from 20s to 5s would cut average overshoot.
 
@@ -70,7 +70,7 @@ WEBAPP      [startup ~warmup~][--- stable 0.0-0.2 CPU, 1.9GB mem -------->
 - **Priority:** P1
 
 ### Rank 4: Reduce Concord Suspend Polling Delay
-- **Description:** After all tests completed, the Concord parent remained suspended for 51s before resuming. This gap is Concord's internal polling interval and is pure wall-clock waste.
+- **Description:** After all children completed, the Concord parent remained suspended for 51s before resuming. This gap is Concord's internal polling interval and is pure wall-clock waste.
 - **Evidence:** Tests ended at 1772804892 epoch, parent resumed at 1772804943 epoch (51s gap).
 - **Estimated savings:** 51s
 - **Difficulty:** Medium
@@ -180,7 +180,7 @@ Ordered by impact-to-effort ratio (highest first).
 
 4. **Parallelize Substantiate Setup Chain.** The first 340s of Substantiate execution is a mostly-sequential setup chain. Only 37 tests run, while 0 workers sit idle.
 
-5. **Reduce Concord Suspend Polling Delay.** After all tests completed, the Concord parent remained suspended for 51s before resuming. This gap is Concord's internal polling interval and is pure wall-clock waste.
+5. **Reduce Concord Suspend Polling Delay.** After all children completed, the Concord parent remained suspended for 51s before resuming. This gap is Concord's internal polling interval and is pure wall-clock waste.
 
 6. **Parallelize Concord Child Checking.** The Concord parent checks 2 children in separate suspend/resume cycles. 1 of 2 resumes overlap with test execution and do not affect wall-clock. Checking all children in a single resume would eliminate redundant cycles.
 

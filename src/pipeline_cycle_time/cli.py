@@ -10,8 +10,14 @@ from .analyzers import orchestration, test_reports, app_logs, metrics, correlato
 from .report import generator
 
 
-def analyze_fixtures(fixtures_dir: str, output: str | None = None) -> str:
+def analyze_fixtures(
+    fixtures_dir: str,
+    output: str | None = None,
+    children_end_epoch_s: float = 0.0,
+) -> str:
     """Run analysis against local fixture data."""
+    from .fetchers.discovery import get_child_end_epoch_s
+
     d = Path(fixtures_dir)
 
     # Analyze orchestration
@@ -32,9 +38,18 @@ def analyze_fixtures(fixtures_dir: str, output: str | None = None) -> str:
     # Analyze metrics
     metrics_result = metrics.analyze(str(d / "metrics"))
 
+    # If child logs exist in the output dir, use them for accurate polling delay
+    if children_end_epoch_s == 0.0:
+        child_logs = sorted((d / "logs").glob("child-*.txt"))
+        for cl in child_logs:
+            end_s = get_child_end_epoch_s(cl.read_text())
+            if end_s > children_end_epoch_s:
+                children_end_epoch_s = end_s
+
     # Correlate findings (includes critical-path analysis)
     correlation = correlator.correlate(
-        orch_result, kono, substantiate, app_logs_result, dispatcher_result, metrics_result
+        orch_result, kono, substantiate, app_logs_result, dispatcher_result,
+        metrics_result, children_end_epoch_s=children_end_epoch_s,
     )
 
     # Generate report
@@ -92,8 +107,9 @@ def analyze_live(
     print(f"  namespace={meta.namespace}  webapp={meta.webapp_pod}  "
           f"dispatcher={meta.dispatcher_pod}", file=sys.stderr)
 
-    # 3. Fetch child process logs and discover S3 report locations
+    # 3. Fetch child process logs and discover S3 report locations + end times
     report_locations = []
+    children_end_epoch_s = 0.0
     for child_id in meta.children:
         print(f"Fetching child process log {child_id[:8]}...", file=sys.stderr)
         try:
@@ -102,6 +118,9 @@ def analyze_live(
             report_locations.extend(
                 discovery.discover_report_locations(child_id, child_log)
             )
+            child_end = discovery.get_child_end_epoch_s(child_log)
+            if child_end > children_end_epoch_s:
+                children_end_epoch_s = child_end
         except Exception as e:
             print(f"  Warning: failed to fetch child {child_id[:8]}: {e}",
                   file=sys.stderr)
@@ -220,7 +239,7 @@ def analyze_live(
 
     # 7. Run analysis on fetched data
     print("Running analysis...", file=sys.stderr)
-    return analyze_fixtures(str(out), output)
+    return analyze_fixtures(str(out), output, children_end_epoch_s=children_end_epoch_s)
 
 
 def main() -> None:
