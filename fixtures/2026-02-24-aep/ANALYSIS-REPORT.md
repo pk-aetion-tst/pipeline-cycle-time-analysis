@@ -1,6 +1,6 @@
 # CI Pipeline Comprehensive Analysis Report
 
-**Date:** 2025-02-25
+**Date:** 2026-02-24
 **Scope:** Full pipeline from Concord orchestration through deployment to test completion
 **Data Sources:** Concord orchestration logs, Kono integration tests, Substantiate E2E tests, application logs and metrics
 
@@ -8,19 +8,19 @@
 
 ## 1. Executive Summary
 
-The full CI pipeline completed in approximately **35 minutes end-to-end**: 20m26s for orchestration/deployment (Concord) followed by overlapping test execution (Kono: 4m43s, Substantiate: 15m06s).
+The full CI pipeline window in this fixture is **20m26s end-to-end** (Concord: 20m26s). Test execution overlaps this orchestration window (Kono: 4m43s, Substantiate: 15m06s).
 
-**All 1,501 tests passed** (1,245 Kono + 256 Substantiate), with a single Substantiate failure on a known-flaky test and 6 skips. The application itself showed no resource bottlenecks whatsoever during execution.
+Across 1,501 total tests (1,245 Kono + 256 Substantiate): **1,494 passed, 1 failed, and 6 skipped**. The application itself showed no resource bottlenecks during execution.
 
 ### Top Findings
 
-1. **86.5% of orchestration time is idle waiting.** Concord spends 17m41s of its 20m26s suspended, waiting for child processes. Each resume cycle wastes ~30s on redundant repo exports and dependency resolution. The parent checks children sequentially even though they run in parallel.
+1. **~89.8% of orchestration time is idle waiting.** Concord spends 18m20s of its 20m26s suspended while waiting for child processes. Resume cycles repeatedly re-export the repo and re-resolve dependencies before checking children.
 
 2. **Kubernetes pod startup latency dominates job execution.** Dispatcher job 236757 took 196s from scheduling to pod start, but only 17s of actual compute. This 10:1 overhead ratio means short jobs are bottlenecked by infrastructure, not by application logic.
 
 3. **Test setup serialization wastes worker capacity.** Both test suites suffer from sequential setup phases that leave workers idle. Kono Pool-1 wastes 620s of worker capacity on idle threads. Substantiate's setup phase leaves workers 4 and 5 idle for 300+ seconds.
 
-4. **Polling-based wait patterns overshoot consistently.** Substantiate tests spend 76.8% of aggregate time polling backends at 20s intervals. Each poll cycle can overshoot actual completion by up to 20s, compounding across dozens of tests.
+4. **Polling-based wait patterns likely contribute substantial overhead.** Substantiate aggregate runtime is dominated by long-running compute waits; precise polling-vs-non-polling attribution is inferred and not fully observable from these fixtures alone.
 
 5. **Kono's two ForkJoinPools run sequentially when they could overlap.** Pool-2 waits for Pool-1 to finish despite having no dependency. Running them concurrently would save ~58s (20% of Kono wall-clock time).
 
@@ -56,21 +56,21 @@ WEBAPP      [startup ~warmup~][--- stable 0.3-0.5 CPU, 1.6GB mem -------->
 
 **Legend:** `[===]` active work, `[~~~]` idle/suspended, `[-->` continues, `|` phase boundary
 
-**Key observation:** The pipeline is fundamentally sequential: Concord orchestration must complete before tests begin. The ~18-minute orchestration phase — of which only 2m45s is active work — is the primary wall-clock bottleneck.
+**Key observation:** Concord orchestration is the dominant gated phase, but tests overlap with the orchestration window in this fixture. Most orchestration time is suspended waiting on child processes.
 
 ---
 
 ## 3. Ranked Optimization Opportunities
 
 ### Rank 1: Reduce Concord Resume Overhead
-- **Description:** Each time the Concord parent resumes to check a child process, it redundantly re-exports the repository and re-resolves dependencies (~30s per resume). With two sequential child checks, this wastes ~60s.
+- **Description:** Each time the Concord parent resumes to check a child process, it re-exports the repository and re-resolves dependencies. Across two resume cycles in this run, this overhead is ~20s.
 - **Evidence:** Concord logs show repo export + dependency resolution repeated on each of the two resume cycles.
-- **Estimated savings:** 60s
+- **Estimated savings:** 20-30s
 - **Difficulty:** Low — cache or skip repo export on resume when no source changes occurred.
 - **Priority:** P1 — Pure waste with a straightforward fix.
 
 ### Rank 2: Parallelize Concord Child Checking
-- **Description:** The Concord parent checks children sequentially: it resumes for child c6cbe79e, confirms completion, re-suspends, then later resumes for 806f92a1. If both children are checked in a single resume, the second suspend/resume cycle (with its ~30s overhead) is eliminated entirely.
+- **Description:** The Concord parent checks children sequentially: it resumes for child c6cbe79e, confirms completion, re-suspends, then later resumes for 806f92a1. If both children are checked in a single resume, one full suspend/resume cycle is eliminated.
 - **Evidence:** Two separate suspend/resume cycles in orchestration logs, children already running in parallel.
 - **Estimated savings:** 30-45s
 - **Difficulty:** Medium — requires changes to Concord's child-wait logic.
@@ -145,12 +145,12 @@ WEBAPP      [startup ~warmup~][--- stable 0.3-0.5 CPU, 1.6GB mem -------->
 | AWS setup | 5.8s | 0.5% |
 | Config/Mica | 16.9s | 1.4% |
 | Helm upgrade | 69.3s | 5.6% |
-| Suspended (children) | 17m41s | 86.5% |
-| Active overhead on resume | ~60s | 4.9% |
+| Suspended (children) | 18m20s | 89.8% |
+| Active overhead on resume | ~20s | 1.6% |
 
-**Active work is only 2m45s (13.5%).** The vast majority of the orchestration phase is spent waiting for child processes. This is structurally acceptable — the parent must wait — but the per-resume overhead of repo re-export and dependency re-resolution is pure waste.
+**Active work is ~2m05s (10.2%).** The vast majority of the orchestration phase is spent waiting for child processes.
 
-The sequential child-checking pattern means the parent process suspends and resumes twice. Each cycle carries 16-32s of overhead. Since both children are already running in parallel, a single check-all-children resume would eliminate one full cycle.
+The sequential child-checking pattern means the parent process suspends and resumes twice. In this run, the two resume cycles add ~20s of repeated export/dependency overhead before child checks.
 
 ### 4.2 Kono Integration Tests
 
@@ -169,12 +169,12 @@ The sequential child-checking pattern means the parent process suspends and resu
 **Code-search-servlet tests (577 tests, 46% of total):** The long tail is notable — p50 is 294ms but p99 is 2,474ms, an 8.4x spread. This suggests certain search patterns or data configurations trigger significantly slower code paths. Worth investigating if individual test optimization becomes a priority.
 
 **Slowest non-compute tests:**
-- `projects-service getFolderTree()` for CODE_LIST: 5.8s
-- `projects-service getFolderTree()` for CUSTOM_OUTPUT: 5.6s
+- `projects-service getFolderTree()` for CODE_LIST: 597ms
+- `projects-service getFolderTree()` for CUSTOM_OUTPUT: 512ms
 - Cognito SSO: 5.5s
 - Measure chaining setup: 6.5s
 
-These are all under 7s individually and not on the critical path, but the `getFolderTree()` tests may indicate a slow tree-traversal query worth profiling.
+Only measure chaining setup is above 6s; both `getFolderTree()` examples are sub-second in this fixture.
 
 ### 4.3 Substantiate E2E Tests
 
@@ -184,13 +184,13 @@ These are all under 7s individually and not on the critical path, but the `getFo
 | Pass rate | 97.3% (1 failure, 6 skipped) |
 | Wall-clock | 907.8s (15m06s) |
 | Aggregate time | 116.1 min |
-| Compute wait % | 76.8% |
+| Compute wait % | 76.8% (inferred from aggregate durations) |
 
 **Two-phase structure is the key insight.** The first 340s (37% of wall-clock) runs only 19 tests with low parallelism due to the sequential setup chain. The remaining 570s runs 237 tests with 12 saturated workers.
 
 **The setup chain is:** authenticate -> create project -> create base measures -> create cohorts -> create result setups. Each step depends on the previous. This serialization is the structural bottleneck.
 
-**Polling overshoot** is a systemic issue. With a 20s interval, each poll-wait test overshoots actual backend completion by 0-20s (10s average). Across many tests, this adds up. The impact on wall-clock time depends on how many polling tests are on the critical path, but reducing the interval is a low-risk change.
+**Polling overshoot** may be a systemic issue, but precise overshoot attribution requires additional instrumentation (for example, per-poll timestamps and backend completion timestamps).
 
 **The single flaky test** ("result views") fails with a loading spinner timeout. The 71.8s wasted on the failed attempt is significant for a single test. The root cause likely involves a race condition between the test's implicit wait and the UI's loading state.
 
@@ -210,7 +210,7 @@ The webapp has substantial headroom. No tuning is needed on the application reso
 
 **EffectConsumer queue blocking:** 7 warnings with worst-case 0.234s. Messages that "should have been an actuator" are incorrectly routed through the effect queue, blocking it briefly. This is a minor issue today but represents a message-routing bug that should be fixed.
 
-**52 missing dataset attribute mapping warnings:** These should be reviewed to determine if they represent configuration drift or intentional gaps. If they are expected, suppress the warnings to reduce log noise. If not, they represent data model inconsistencies.
+**78 missing dataset attribute mapping warnings:** These should be reviewed to determine if they represent configuration drift or intentional gaps. If expected, suppress the warnings to reduce log noise. If not, they represent data model inconsistencies.
 
 **15 validation errors:** Confirmed as intentional test cases (negative testing). No action needed.
 
@@ -250,8 +250,8 @@ Ordered by impact-to-effort ratio (highest first).
 
 10. **Root-cause the flaky "result views" test.** The loading spinner timeout suggests a race condition. Add explicit wait conditions or increase the test's resilience to slow initial loads. Saves 72s each time it flakes.
 
-11. **Audit 52 missing dataset attribute mappings.** Determine if these are expected or represent configuration drift. Either fix the mappings or suppress the warnings.
+11. **Audit 78 missing dataset attribute mappings.** Determine if these are expected or represent configuration drift. Either fix the mappings or suppress the warnings.
 
 ---
 
-*Report generated from CI pipeline execution on 2025-02-25. Data sources: Concord orchestration logs (18:21:04-18:41:30 UTC), Kono test results (1,245 tests), Substantiate test results (256 tests), application metrics and logs.*
+*Report generated from CI pipeline execution on 2026-02-24. Data sources: Concord orchestration logs (18:21:04-18:41:30 UTC), Kono test results (1,245 tests), Substantiate test results (256 tests), application metrics and logs.*
