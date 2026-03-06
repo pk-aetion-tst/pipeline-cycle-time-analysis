@@ -94,27 +94,27 @@ def analyze(metrics_dir: str) -> MetricsResult:
     result.dispatcher_memory = _summarize(str(d / "dispatcher-memory.json"), "Dispatcher Memory", "bytes")
 
     # HikariCP
-    hikari_active = list(d.glob("hikaricp_connections_active*.json"))
+    hikari_active = sorted(d.glob("hikaricp_connections_active*.json"))
     if hikari_active:
         result.hikaricp_active = _summarize(str(hikari_active[0]), "HikariCP Active", "connections")
 
-    hikari_pending = list(d.glob("hikaricp_connections_pending*.json"))
+    hikari_pending = sorted(d.glob("hikaricp_connections_pending*.json"))
     if hikari_pending:
         result.hikaricp_pending = _summarize(str(hikari_pending[0]), "HikariCP Pending", "connections")
 
-    jetty = list(d.glob("jetty_threads_busy*.json"))
+    jetty = sorted(d.glob("jetty_threads_busy*.json"))
     if jetty:
         result.jetty_threads = _summarize(str(jetty[0]), "Jetty Threads", "threads")
 
-    jvm_heap = list(d.glob("jvm_memory_used_bytes*.json"))
+    jvm_heap = sorted(d.glob("jvm_memory_used_bytes*.json"))
     if jvm_heap:
         result.jvm_heap = _summarize(str(jvm_heap[0]), "JVM Heap", "bytes")
 
-    jvm_threads = list(d.glob("jvm_threads_current*.json"))
+    jvm_threads = sorted(d.glob("jvm_threads_current*.json"))
     if jvm_threads:
         result.jvm_threads = _summarize(str(jvm_threads[0]), "JVM Threads", "threads")
 
-    gc = list(d.glob("rate_jvm_gc*.json"))
+    gc = sorted(d.glob("rate_jvm_gc*.json"))
     if gc:
         result.gc = _summarize(str(gc[0]), "GC Rate", "s/s")
 

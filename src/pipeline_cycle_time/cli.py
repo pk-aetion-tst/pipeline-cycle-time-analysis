@@ -31,7 +31,7 @@ def analyze_fixtures(fixtures_dir: str, output: str | None = None) -> str:
     # Analyze metrics
     metrics_result = metrics.analyze(str(d / "metrics"))
 
-    # Correlate findings
+    # Correlate findings (includes critical-path analysis)
     correlation = correlator.correlate(
         orch_result, kono, substantiate, app_logs_result, dispatcher_result, metrics_result
     )

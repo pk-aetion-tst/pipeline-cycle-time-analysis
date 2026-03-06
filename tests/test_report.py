@@ -67,16 +67,26 @@ class TestReportContent:
         assert "SUBSTANTIATE" in generated_report
         assert "WEBAPP" in generated_report
 
-    def test_all_seven_findings_in_report(self, generated_report):
-        """The report must mention all 7 key findings."""
+    def test_all_key_findings_in_report(self, generated_report):
+        """The report must mention all key findings."""
         report = generated_report.lower()
         assert "resume" in report, "Missing resume overhead"
+        assert "polling delay" in report, "Missing polling delay"
         assert "child" in report, "Missing child checking"
         assert "pod" in report or "k8s" in report, "Missing pod startup"
         assert "forkjoinpool" in report or "pool-1" in report, "Missing kono pools"
         assert "setup" in report, "Missing setup serialization"
-        assert "polling" in report, "Missing polling interval"
+        assert "polling interval" in report, "Missing polling interval"
         assert "headroom" in report or "bottleneck" in report, "Missing resource headroom"
+
+    def test_critical_path_in_report(self, generated_report):
+        """Report must distinguish critical-path vs overlapping resume overhead."""
+        assert "critical path" in generated_report.lower()
+        assert "overlaps" in generated_report.lower()
+
+    def test_report_date_from_data(self, generated_report):
+        """Report date should come from fixture data, not wall-clock time."""
+        assert "**Date:** 2026-02-24" in generated_report
 
 
 class TestReportAgainstGoldenBaseline:
@@ -103,3 +113,48 @@ class TestReportAgainstGoldenBaseline:
         assert "256" in generated_report  # Substantiate test count
         assert "283.4" in generated_report  # Kono wall-clock
         assert "2.09" in generated_report  # CPU peak
+
+
+class TestReportDeterminism:
+    """The same fixture data must always produce the exact same report."""
+
+    def test_snapshot_match(self, generated_report):
+        """Generated report must match committed snapshot exactly.
+
+        If the report format changes intentionally, update the snapshot:
+            python -c "
+            from pipeline_cycle_time.cli import analyze_fixtures
+            r = analyze_fixtures('fixtures/2026-02-24-aep')
+            open('tests/snapshot_report.md','w').write(r)
+            "
+        """
+        snapshot_path = Path(__file__).parent / "snapshot_report.md"
+        assert snapshot_path.exists(), (
+            "Snapshot not found. Generate it with: "
+            "python -c \"from pipeline_cycle_time.cli import analyze_fixtures; "
+            "open('tests/snapshot_report.md','w').write(analyze_fixtures('fixtures/2026-02-24-aep'))\""
+        )
+        snapshot = snapshot_path.read_text()
+        if generated_report != snapshot:
+            # Find first differing line for clear error
+            gen_lines = generated_report.splitlines()
+            snap_lines = snapshot.splitlines()
+            for i, (g, s) in enumerate(zip(gen_lines, snap_lines)):
+                if g != s:
+                    pytest.fail(
+                        f"Report differs from snapshot at line {i+1}:\n"
+                        f"  generated: {g!r}\n"
+                        f"  snapshot:  {s!r}\n"
+                        f"If intentional, regenerate snapshot (see docstring)."
+                    )
+            if len(gen_lines) != len(snap_lines):
+                pytest.fail(
+                    f"Report has {len(gen_lines)} lines, snapshot has {len(snap_lines)} lines."
+                )
+
+    def test_idempotent(self, fixtures_dir):
+        """Running analysis twice produces identical output."""
+        from pipeline_cycle_time.cli import analyze_fixtures
+        report1 = analyze_fixtures(fixtures_dir)
+        report2 = analyze_fixtures(fixtures_dir)
+        assert report1 == report2

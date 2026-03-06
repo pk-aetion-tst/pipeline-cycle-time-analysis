@@ -25,13 +25,20 @@ def generate(
     dispatcher: DispatcherTimeline,
     metrics_result: MetricsResult,
     correlation: CorrelationResult,
+    report_date: str | None = None,
 ) -> str:
     lines: list[str] = []
 
     # Header
     lines.append("# CI Pipeline Comprehensive Analysis Report")
     lines.append("")
-    lines.append(f"**Date:** {datetime.now(timezone.utc).strftime('%Y-%m-%d')}")
+    if report_date is None:
+        # Derive from data: use the Concord log start date for reproducibility
+        if orchestration.total_start:
+            report_date = orchestration.total_start.strftime("%Y-%m-%d")
+        else:
+            report_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    lines.append(f"**Date:** {report_date}")
     lines.append("**Scope:** Full pipeline from Concord orchestration through deployment to test completion")
     lines.append("**Data Sources:** Concord orchestration logs, Kono integration tests, Substantiate E2E tests, application logs and metrics")
     lines.append("")
@@ -116,9 +123,13 @@ def generate(
         pct = (phase.duration_s / total * 100) if total > 0 else 0
         lines.append(f"| {phase.name} | {_fmt_duration(phase.duration_s)} | {pct:.1f}% |")
     if orchestration.resume_overheads:
-        overhead = orchestration.total_resume_overhead_s
-        pct = (overhead / total * 100) if total > 0 else 0
-        lines.append(f"| Active overhead on resume | ~{overhead:.0f}s | {pct:.1f}% |")
+        for i, r in enumerate(orchestration.resume_overheads, 1):
+            path_label = "critical path" if r.on_critical_path else "overlaps tests"
+            pct = (r.total_s / total * 100) if total > 0 else 0
+            lines.append(f"| Resume {i} overhead ({path_label}) | {r.total_s:.0f}s | {pct:.1f}% |")
+        critical = orchestration.critical_path_resume_overhead_s
+        pct = (critical / total * 100) if total > 0 else 0
+        lines.append(f"| **Critical-path resume overhead** | **{critical:.0f}s** | **{pct:.1f}%** |")
     lines.append("")
     active_pct = ((total - orchestration.suspended_duration_s) / total * 100) if total > 0 else 0
     lines.append(

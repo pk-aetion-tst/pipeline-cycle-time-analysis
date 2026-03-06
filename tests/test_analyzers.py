@@ -36,14 +36,21 @@ class TestOrchestration:
         assert any("c6cbe79e" in c for c in result.children)
 
     def test_finding_1_resume_overhead(self, fixtures_dir):
-        """Finding 1: Concord resume overhead (~20s from redundant repo export + dep resolution)."""
+        """Finding 1: Concord resume overhead — per-cycle breakdown."""
         from pipeline_cycle_time.analyzers.orchestration import analyze
         result = analyze(os.path.join(fixtures_dir, "logs", "concord-log.txt"))
         assert result.resume_count == 2, "Should detect 2 resume cycles"
-        # Total overhead should be meaningful (golden says ~20s)
-        assert result.total_resume_overhead_s > 15, (
-            f"Resume overhead {result.total_resume_overhead_s}s is too low"
+        # Per-cycle overhead matches log evidence (PR #7):
+        #   Resume 1: ~30s (18:29:41 → 18:30:11)
+        #   Resume 2: ~9s  (18:41:14 → 18:41:23)
+        assert 28 < result.resume_overheads[0].total_s < 32, (
+            f"Resume 1 should be ~30s, got {result.resume_overheads[0].total_s:.1f}s"
         )
+        assert 7 < result.resume_overheads[1].total_s < 11, (
+            f"Resume 2 should be ~9s, got {result.resume_overheads[1].total_s:.1f}s"
+        )
+        # Total overhead ~38s
+        assert 36 < result.total_resume_overhead_s < 42
 
     def test_finding_2_sequential_child_checking(self, fixtures_dir):
         """Finding 2: Sequential child checking (extra resume cycle)."""
@@ -261,34 +268,81 @@ class TestCorrelator:
         met = metrics.analyze(os.path.join(d, "metrics"))
         return correlator.correlate(orch, kono, sub, app, disp, met)
 
-    def test_all_seven_findings_present(self, fixtures_dir):
-        """All 7 key findings must be present in the correlation output."""
+    def test_all_key_findings_present(self, fixtures_dir):
+        """All key findings must be present in the correlation output."""
         result = self._run_full_analysis(fixtures_dir)
         titles = [f.title for f in result.findings]
 
-        # Finding 1: Concord resume overhead
-        assert any("Resume Overhead" in t for t in titles), f"Missing resume overhead finding. Got: {titles}"
-
-        # Finding 2: Sequential child checking
-        assert any("Child" in t for t in titles), f"Missing sequential child finding. Got: {titles}"
-
-        # Finding 3: K8s pod startup latency
-        assert any("Pod" in t or "K8s" in t for t in titles), f"Missing pod startup finding. Got: {titles}"
-
-        # Finding 4: Kono sequential pools
-        assert any("ForkJoinPool" in t or "Concurrent" in t for t in titles), f"Missing kono pools finding. Got: {titles}"
-
-        # Finding 5: Substantiate setup serialization
-        assert any("Setup" in t for t in titles), f"Missing setup finding. Got: {titles}"
-
-        # Finding 6: Polling interval
-        assert any("Polling" in t for t in titles), f"Missing polling finding. Got: {titles}"
-
-        # Finding 7: Application headroom
-        assert any("Headroom" in t for t in titles), f"Missing headroom finding. Got: {titles}"
+        assert any("Resume Overhead" in t for t in titles), f"Missing resume overhead. Got: {titles}"
+        assert any("Polling Delay" in t for t in titles), f"Missing polling delay. Got: {titles}"
+        assert any("Child" in t for t in titles), f"Missing child checking. Got: {titles}"
+        assert any("Pod" in t or "K8s" in t for t in titles), f"Missing pod startup. Got: {titles}"
+        assert any("ForkJoinPool" in t or "Concurrent" in t for t in titles), f"Missing kono pools. Got: {titles}"
+        assert any("Setup" in t for t in titles), f"Missing setup. Got: {titles}"
+        assert any("Polling Interval" in t for t in titles), f"Missing polling interval. Got: {titles}"
+        assert any("Headroom" in t for t in titles), f"Missing headroom. Got: {titles}"
 
     def test_findings_have_evidence(self, fixtures_dir):
         result = self._run_full_analysis(fixtures_dir)
         for f in result.findings:
             assert f.evidence, f"Finding '{f.title}' missing evidence"
             assert f.description, f"Finding '{f.title}' missing description"
+
+    def test_findings_sorted_by_rank(self, fixtures_dir):
+        """Findings must be sorted by rank for deterministic output."""
+        result = self._run_full_analysis(fixtures_dir)
+        ranks = [f.rank for f in result.findings]
+        assert ranks == sorted(ranks), f"Findings not sorted by rank: {ranks}"
+
+    def test_critical_path_analysis(self, fixtures_dir):
+        """Resume cycles overlapping with test execution are not on critical path."""
+        from pipeline_cycle_time.analyzers import (
+            orchestration, test_reports, app_logs, metrics, correlator
+        )
+        d = fixtures_dir
+        orch = orchestration.analyze(os.path.join(d, "logs", "concord-log.txt"))
+        kono = test_reports.analyze_timeline(
+            os.path.join(d, "kono-report", "data", "timeline.json"), "Kono"
+        )
+        sub = test_reports.analyze_timeline(
+            os.path.join(d, "substantiate-report", "data", "timeline.json"), "Substantiate"
+        )
+        app = app_logs.analyze_webapp_logs(os.path.join(d, "logs", "webapp-logs.json"))
+        disp = app_logs.analyze_dispatcher_logs(os.path.join(d, "logs", "dispatcher-logs.json"))
+        met = metrics.analyze(os.path.join(d, "metrics"))
+
+        # Correlate — this triggers critical path marking
+        correlator.correlate(orch, kono, sub, app, disp, met)
+
+        # Resume 1 (~18:29:41) overlaps with Substantiate (ends ~18:40:18)
+        assert not orch.resume_overheads[0].on_critical_path, (
+            "Resume 1 should NOT be on critical path (tests still running)"
+        )
+        # Resume 2 (~18:41:14) is after all tests finished
+        assert orch.resume_overheads[1].on_critical_path, (
+            "Resume 2 should be on critical path (all tests done)"
+        )
+        # Critical-path overhead is only the second resume (~9s)
+        assert orch.critical_path_resume_overhead_s < 12, (
+            f"Critical path overhead should be ~9s, got {orch.critical_path_resume_overhead_s:.1f}s"
+        )
+
+    def test_polling_delay_finding(self, fixtures_dir):
+        """The gap between test end and parent resume is surfaced as a finding."""
+        result = self._run_full_analysis(fixtures_dir)
+        polling_findings = [f for f in result.findings if "Polling Delay" in f.title]
+        assert len(polling_findings) == 1
+        f = polling_findings[0]
+        # Substantiate ends ~18:40:18, parent resumes ~18:41:14 => ~56s gap
+        assert "56s" in f.estimated_savings_s or "55s" in f.estimated_savings_s or "56" in f.description, (
+            f"Polling delay should be ~56s, got: {f.description}"
+        )
+
+    def test_resume_savings_not_overstated(self, fixtures_dir):
+        """Resume overhead savings must reflect only critical-path waste (PR #7)."""
+        result = self._run_full_analysis(fixtures_dir)
+        resume_finding = [f for f in result.findings if "Resume Overhead" in f.title][0]
+        # Should say 9s, not 38s or 60s
+        assert "9s" in resume_finding.estimated_savings_s, (
+            f"Savings should be 9s (critical path only), got: {resume_finding.estimated_savings_s}"
+        )
