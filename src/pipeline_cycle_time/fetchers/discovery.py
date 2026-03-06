@@ -21,10 +21,15 @@ class ReportLocation:
 
 
 @dataclass
+class DeployedComponent:
+    """A component discovered from Grafana monitoring URLs in the Concord log."""
+    label: str   # human label from the URL, e.g. "webapp", "dispatcher", "fe-aep"
+    pod: str     # full pod name, e.g. "webapp-5f9486b946-wlwbf"
+
+
+@dataclass
 class PipelineMetadata:
     namespace: str = ""
-    webapp_pod: str = ""
-    dispatcher_pod: str = ""
     s3_bucket: str = ""
     s3_folder: str = ""
     grafana_base_url: str = ""
@@ -32,6 +37,7 @@ class PipelineMetadata:
     end_epoch_ns: int = 0
     children: list[str] = field(default_factory=list)
     report_locations: list[ReportLocation] = field(default_factory=list)
+    deployed_components: list[DeployedComponent] = field(default_factory=list)
 
     @property
     def start_epoch_s(self) -> float:
@@ -40,6 +46,20 @@ class PipelineMetadata:
     @property
     def end_epoch_s(self) -> float:
         return self.end_epoch_ns / 1e9
+
+    @property
+    def webapp_pod(self) -> str:
+        for c in self.deployed_components:
+            if c.label == "webapp":
+                return c.pod
+        return ""
+
+    @property
+    def dispatcher_pod(self) -> str:
+        for c in self.deployed_components:
+            if c.label == "dispatcher":
+                return c.pod
+        return ""
 
 
 def _parse_ts(s: str) -> datetime:
@@ -92,26 +112,26 @@ def discover(log_text: str) -> PipelineMetadata:
         if cm:
             meta.children.append(cm.group(1))
 
-    # Extract pod names from Grafana monitoring URLs in the log
-    # webapp pod: pod=webapp-XXXXX
-    webapp_pod_re = re.compile(r'pod(?:%3D|=)\\?"?(webapp-[a-z0-9-]+)')
-    dispatcher_pod_re = re.compile(r'pod(?:%3D|=)\\?"?(dispatcher-batch-job-[a-z0-9-]+)')
-
-    # Also check URL-encoded versions
+    # Extract deployed components and Grafana base URL from monitoring URLs.
+    # Dashboard URLs:  <https://monitoring.../d/...?var-pod=<pod>&from=...|<label>>
+    # Both end with |<label>> — we extract pod and label from dashboard URLs.
+    component_re = re.compile(
+        r'var-pod=([a-z0-9][a-z0-9._-]+)'  # pod name after var-pod=
+        r'[^|]*\|'                           # skip until pipe
+        r'([^>]+)'                           # label (until closing >)
+    )
+    seen_labels: set[str] = set()
     for line in log_text.splitlines():
         decoded = unquote(line)
-        if not meta.webapp_pod:
-            wm = re.search(r'pod[=\\"]+(webapp-[a-z0-9-]+)', decoded)
-            if wm:
-                meta.webapp_pod = wm.group(1)
-        if not meta.dispatcher_pod:
-            dm = re.search(r'pod[=\\"]+(dispatcher-batch-job-[a-z0-9-]+)', decoded)
-            if dm:
-                meta.dispatcher_pod = dm.group(1)
         if not meta.grafana_base_url:
             gm = re.search(r'(https://monitoring\.[^/|>]+)', decoded)
             if gm:
                 meta.grafana_base_url = gm.group(1)
+        for cm in component_re.finditer(decoded):
+            pod, label = cm.group(1), cm.group(2).strip()
+            if label not in seen_labels:
+                seen_labels.add(label)
+                meta.deployed_components.append(DeployedComponent(label=label, pod=pod))
 
     return meta
 

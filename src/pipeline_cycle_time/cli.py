@@ -59,10 +59,13 @@ def analyze_live(
     grafana_cookie: str | None = None,
     grafana_token: str | None = None,
     aws_profile: str = "dev",
+    concord_url: str | None = None,
 ) -> str:
     """Run analysis by fetching live data from production APIs."""
     from .fetchers import concord, discovery, loki, prometheus as prom, s3_reports
     from .fetchers.prometheus import METRIC_QUERIES, DISPATCHER_QUERIES
+
+    concord_base = concord_url or concord.CONCORD_BASE_URL
 
     if not grafana_cookie and not grafana_token:
         print("Error: --grafana-cookie or --grafana-token is required for live mode",
@@ -77,7 +80,7 @@ def analyze_live(
 
     # 1. Fetch Concord log
     print(f"Fetching Concord log for process {process_id}...", file=sys.stderr)
-    log_text = concord.fetch_log(process_id)
+    log_text = concord.fetch_log(process_id, base_url=concord_base)
     log_dir = out / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     (log_dir / "concord-log.txt").write_text(log_text)
@@ -89,15 +92,16 @@ def analyze_live(
         sys.exit(1)
 
     grafana_base_url = meta.grafana_base_url or loki.GRAFANA_BASE_URL
-    print(f"  namespace={meta.namespace}  webapp={meta.webapp_pod}  "
-          f"dispatcher={meta.dispatcher_pod}", file=sys.stderr)
+    comp_summary = ", ".join(f"{c.label}={c.pod}" for c in meta.deployed_components)
+    print(f"  namespace={meta.namespace}  components: {comp_summary or 'none found'}",
+          file=sys.stderr)
 
     # 3. Fetch child process logs and discover S3 report locations
     report_locations = []
     for child_id in meta.children:
         print(f"Fetching child process log {child_id[:8]}...", file=sys.stderr)
         try:
-            child_log = concord.fetch_log(child_id)
+            child_log = concord.fetch_log(child_id, base_url=concord_base)
             (log_dir / f"child-{child_id[:8]}.txt").write_text(child_log)
             report_locations.extend(
                 discovery.discover_report_locations(child_id, child_log)
@@ -133,55 +137,33 @@ def analyze_live(
     else:
         print("Warning: could not determine S3 report locations", file=sys.stderr)
 
-    # 5. Fetch Loki logs (webapp + dispatcher)
-    if meta.webapp_pod:
-        print(f"Fetching webapp logs...", file=sys.stderr)
-        try:
-            webapp_data = loki.fetch_logs(
-                namespace=meta.namespace,
-                pod_selector=meta.webapp_pod,
-                start_ns=meta.start_epoch_ns,
-                end_ns=meta.end_epoch_ns,
-                grafana_base_url=grafana_base_url,
-                **grafana_auth,
-            )
-            (log_dir / "webapp-logs.json").write_text(json.dumps(webapp_data))
-        except Exception as e:
-            print(f"Warning: webapp log fetch failed: {e}", file=sys.stderr)
-            (log_dir / "webapp-logs.json").write_text(
-                '{"status":"success","data":{"resultType":"streams","result":[]}}'
-            )
-    else:
-        print("Warning: no webapp pod found, skipping webapp logs", file=sys.stderr)
-        (log_dir / "webapp-logs.json").write_text(
-            '{"status":"success","data":{"resultType":"streams","result":[]}}'
-        )
+    # 5. Fetch Loki logs for all deployed components
+    empty_loki = '{"status":"success","data":{"resultType":"streams","result":[]}}'
 
-    if meta.dispatcher_pod:
-        print(f"Fetching dispatcher logs...", file=sys.stderr)
-        # Use regex to match all pods for this dispatcher job
-        dispatcher_selector = meta.dispatcher_pod
+    # Map component labels to the log filenames the analyzers expect
+    LABEL_TO_LOG_FILE = {"webapp": "webapp-logs.json", "dispatcher": "dispatcher-logs.json"}
+
+    for comp in meta.deployed_components:
+        log_file = LABEL_TO_LOG_FILE.get(comp.label, f"{comp.label}-logs.json")
+        print(f"Fetching {comp.label} logs (pod={comp.pod})...", file=sys.stderr)
         try:
-            disp_data = loki.fetch_logs(
+            data = loki.fetch_logs(
                 namespace=meta.namespace,
-                pod_selector=dispatcher_selector,
+                pod_selector=comp.pod,
                 start_ns=meta.start_epoch_ns,
                 end_ns=meta.end_epoch_ns,
                 grafana_base_url=grafana_base_url,
                 **grafana_auth,
             )
-            (log_dir / "dispatcher-logs.json").write_text(json.dumps(disp_data))
+            (log_dir / log_file).write_text(json.dumps(data))
         except Exception as e:
-            print(f"Warning: dispatcher log fetch failed: {e}", file=sys.stderr)
-            (log_dir / "dispatcher-logs.json").write_text(
-                '{"status":"success","data":{"resultType":"streams","result":[]}}'
-            )
-    else:
-        print("Warning: no dispatcher pod found, skipping dispatcher logs",
-              file=sys.stderr)
-        (log_dir / "dispatcher-logs.json").write_text(
-            '{"status":"success","data":{"resultType":"streams","result":[]}}'
-        )
+            print(f"  Warning: {comp.label} log fetch failed: {e}", file=sys.stderr)
+            (log_dir / log_file).write_text(empty_loki)
+
+    # Ensure webapp-logs.json and dispatcher-logs.json exist for analyzers
+    for required in ("webapp-logs.json", "dispatcher-logs.json"):
+        if not (log_dir / required).exists():
+            (log_dir / required).write_text(empty_loki)
 
     # 6. Fetch Prometheus metrics
     metrics_dir = out / "metrics"
@@ -190,7 +172,7 @@ def analyze_live(
     start_s = meta.start_epoch_s
     end_s = meta.end_epoch_s
 
-    # Webapp metrics
+    # Webapp metrics (use first component labeled "webapp", if any)
     if meta.webapp_pod:
         print(f"Fetching webapp metrics...", file=sys.stderr)
         for query_tpl, filename, desc in METRIC_QUERIES:
@@ -204,7 +186,7 @@ def analyze_live(
             except Exception as e:
                 print(f"  Warning: {desc} fetch failed: {e}", file=sys.stderr)
 
-    # Dispatcher metrics
+    # Dispatcher metrics (use first component labeled "dispatcher", if any)
     if meta.dispatcher_pod:
         print(f"Fetching dispatcher metrics...", file=sys.stderr)
         for query_tpl, filename, desc in DISPATCHER_QUERIES:
@@ -252,6 +234,10 @@ def main() -> None:
         help="AWS profile name (live mode, default: dev)",
     )
     analyze_cmd.add_argument(
+        "--concord-url",
+        help="Concord base URL (default: https://concord.dev.aetion.com)",
+    )
+    analyze_cmd.add_argument(
         "--output-dir",
         help="Directory to save raw fetched data (default: output/<process-id>/)",
     )
@@ -276,6 +262,7 @@ def main() -> None:
             grafana_cookie=args.grafana_cookie,
             grafana_token=args.grafana_token,
             aws_profile=args.aws_profile,
+            concord_url=args.concord_url,
         )
     else:
         print("Either --fixtures-dir or --process-id is required", file=sys.stderr)
